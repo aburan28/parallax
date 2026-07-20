@@ -1,0 +1,18 @@
+# provider-prometheus: first-class SLI provider (DESIGN.md §11). Evaluates PromQL
+# over each trial's measurement window against any PromQL-compatible endpoint.
+apiVersion: parallax.dev/v1alpha1
+kind: Plugin
+metadata:
+  name: provider-prometheus
+spec:
+  kind: provider
+  image: ghcr.io/aburan28/parallax-provider-prometheus:0.1.0
+  verify:
+    cosign:
+      keylessIdentity: "https://github.com/aburan28/parallax/.github/workflows/release.yaml@refs/tags/*"
+      rekor: true
+  config:
+    # Prometheus, Thanos, Mimir, VictoriaMetrics — anything speaking PromQL.
+    # In the kind dev env (hack/env-up.sh) this is the in-cluster prom-lite:
+    endpoint: http://prometheus.monitoring:9090
+    scrapeIntervalHint: 5s

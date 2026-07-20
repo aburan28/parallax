@@ -1,0 +1,61 @@
+// Strategy plugins drive the search: Init(space, budget) then repeated Ask/Tell,
+// with Report for anytime curves (DESIGN.md §5.1, §14). Swap boundary: between
+// ask/tell calls.
+syntax = "proto3";
+
+package parallax.plugin.v1;
+
+option go_package = "github.com/aburan28/parallax/proto/plugin/v1;pluginv1";
+
+service Strategy {
+  rpc Init(InitRequest) returns (InitResponse);
+  rpc Ask(AskRequest) returns (AskResponse);
+  rpc Tell(TellRequest) returns (TellResponse);
+  rpc Report(ReportRequest) returns (ReportResponse);
+}
+
+message InitRequest {
+  // Search space (dimensions + constraints) serialized as JSON (§8 space block).
+  bytes space_json = 1;
+  // Budget currencies (maxTrials / maxClusterTime / maxWallClock) as JSON.
+  bytes budget_json = 2;
+  int64 seed = 3;
+}
+
+message InitResponse {
+  bool ok = 1;
+  string detail = 2;
+}
+
+message Suggestion {
+  string config_hash = 1;
+  // Dimension path → chosen value.
+  map<string, string> assignments = 2;
+}
+
+message AskRequest {
+  int32 count = 1;
+}
+
+message AskResponse {
+  repeated Suggestion suggestions = 1;
+}
+
+message TellRequest {
+  string config_hash = 1;
+  double objective = 2;
+  bool feasible = 3;
+  bytes metrics_json = 4;
+}
+
+message TellResponse {
+  bool ok = 1;
+}
+
+message ReportRequest {}
+
+message ReportResponse {
+  bytes report_json = 1;
+  // True when the strategy has exhausted its budget / converged.
+  bool done = 2;
+}

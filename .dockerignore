@@ -1,0 +1,33 @@
+# Keep the build context small and reproducible.
+.git
+.github
+bin/
+dist/
+hack/bin/
+hack/kind-kubeconfig
+
+# Charts, manifests, docs, examples, tests — not needed to compile the binaries.
+charts/
+config/
+docs/
+examples/
+test/
+sdk/
+
+# Local dev artifacts (--local mode)
+*.db
+*.db-shm
+*.db-wal
+.parallax/
+local-artifacts/
+
+# Editor / OS junk (exFAT AppleDouble sidecars must never enter the image)
+._*
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Other Dockerfiles / compose
+Dockerfile*
+.dockerignore

@@ -1,0 +1,15 @@
+# Sample Dataset CR: a registered, verified captured-traffic workload.
+# Fields match api/v1alpha1 DatasetSpec (captureRef/storageRef are same-namespace
+# LocalRefs; preshard.shards drives kapture-preshard partitioning).
+apiVersion: parallax.dev/v1alpha1
+kind: Dataset
+metadata:
+  name: prod-edge-2026-07-14
+  namespace: bench
+spec:
+  captureRef:
+    name: checkout-capture
+  storageRef:
+    name: kapture-bench-storage
+  preshard:
+    shards: 8

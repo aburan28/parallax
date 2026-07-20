@@ -1,0 +1,30 @@
+// Exporter plugins fan study lifecycle events out to external systems
+// (webhook, Slack, OCI bundle) — DESIGN.md §5.1. Swap boundary: anytime (idempotent).
+syntax = "proto3";
+
+package parallax.plugin.v1;
+
+option go_package = "github.com/aburan28/parallax/proto/plugin/v1;pluginv1";
+
+service Exporter {
+  rpc Export(ExportRequest) returns (ExportResponse);
+}
+
+message ArtifactRef {
+  // runreport | prom-snapshot | readback | k8s-dump | report
+  string kind = 1;
+  string uri = 2;
+  string digest = 3;
+}
+
+message ExportRequest {
+  // Event name, e.g. study.started, trial.collected, candidate.promoted.
+  string event = 1;
+  bytes payload_json = 2;
+  repeated ArtifactRef refs = 3;
+}
+
+message ExportResponse {
+  bool ok = 1;
+  string detail = 2;
+}

@@ -1,0 +1,17 @@
+# Example Dataset registration: a captured-traffic workload artifact.
+# The Dataset controller verifies the parallax manifest against kapture's
+# per-slice manifests and the storage contents, then stamps the ID digest
+# used for closed-loop capture-fidelity reconciliation. See docs/DESIGN.md §10.
+apiVersion: parallax.dev/v1alpha1
+kind: Dataset
+metadata:
+  name: prod-edge-2026-07-14
+  namespace: bench
+spec:
+  captureRef: { namespace: edge, name: checkout-capture }
+  storage:
+    type: s3
+    bucket: kapture-bench
+    prefix: datasets/prod-edge-2026-07-14
+    credentialsSecretRef: { name: bench-dataset-reader }
+  preshards: { count: 8 }   # produced by `parallax datasets preshard` (kapture-preshard)

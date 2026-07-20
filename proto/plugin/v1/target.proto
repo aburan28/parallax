@@ -1,0 +1,75 @@
+// Target plugins own the system-under-test: they apply a config point, gate on
+// health, and reset between trials (DESIGN.md §5.1). Swap boundary: trial.
+syntax = "proto3";
+
+package parallax.plugin.v1;
+
+option go_package = "github.com/aburan28/parallax/proto/plugin/v1;pluginv1";
+
+service Target {
+  // Prepare ensures prerequisites once per study/cluster (charts installed, etc.).
+  rpc Prepare(PrepareRequest) returns (PrepareResponse);
+  // Apply materializes one config point (helm upgrade / CR patch / pod spec).
+  rpc Apply(ApplyRequest) returns (ApplyResponse);
+  // Ready gates on rollout + health before load starts.
+  rpc Ready(ReadyRequest) returns (ReadyResponse);
+  // Reset tears down trial state and quiesces before the next trial.
+  rpc Reset(ResetRequest) returns (ResetResponse);
+  // Contract validates dimension names at admission (rejects unknown dimensions).
+  rpc Contract(ContractRequest) returns (ContractResponse);
+}
+
+message PrepareRequest {
+  bytes config_json = 1;
+}
+
+message PrepareResponse {
+  bool ready = 1;
+  string detail = 2;
+}
+
+message ApplyRequest {
+  string config_hash = 1;
+  // Resolved dimension assignments (dimension path → value), e.g. agent.batchSize=512.
+  map<string, string> dimensions = 2;
+  bytes raw_config_json = 3;
+}
+
+message ApplyResponse {
+  bool applied = 1;
+  string detail = 2;
+  // References to rolled-out objects (for provenance / cleanup).
+  repeated string rolled_out_refs = 3;
+}
+
+message ReadyRequest {
+  string config_hash = 1;
+  int64 timeout_seconds = 2;
+}
+
+message ReadyResponse {
+  bool ready = 1;
+  string detail = 2;
+}
+
+message ResetRequest {
+  string config_hash = 1;
+  // When true, force cold starts (restart pods, clear storage prefix) — §9.
+  bool cold_start = 2;
+}
+
+message ResetResponse {
+  bool ok = 1;
+  string detail = 2;
+}
+
+message ContractRequest {
+  repeated string dimension_names = 1;
+}
+
+message ContractResponse {
+  bool ok = 1;
+  repeated string unknown_dimensions = 2;
+  // Modes this target supports for the given dimensions (e.g. direct, integrated).
+  repeated string supported_modes = 3;
+}

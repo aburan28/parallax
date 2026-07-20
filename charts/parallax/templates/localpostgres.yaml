@@ -1,0 +1,126 @@
+{{- if .Values.db.localPostgres.enabled -}}
+{{- if .Values.db.dsn.secretRef.name -}}
+{{- fail "db.localPostgres.enabled and db.dsn.secretRef.name are mutually exclusive: pick BYO Postgres OR the bundled local one" -}}
+{{- end -}}
+# In-cluster single-replica Postgres for demos / air-gapped kick-the-tyres ONLY.
+# Mirrors kapture history.localPostgres. Bring your own HA Postgres for production
+# (set db.dsn.secretRef instead). DESIGN.md §17.6.
+{{- $pw := .Values.db.localPostgres.password | default (randAlphaNum 24) -}}
+{{- $svc := include "parallax.localPostgres.serviceName" . -}}
+{{- $db := .Values.db.localPostgres.database -}}
+{{- $user := .Values.db.localPostgres.username -}}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "parallax.localPostgres.secretName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "parallax.labels" . | nindent 4 }}
+    app.kubernetes.io/component: localpostgres
+  annotations:
+    # Preserve a generated password across upgrades (don't regenerate every apply).
+    helm.sh/resource-policy: keep
+type: Opaque
+stringData:
+  username: {{ $user | quote }}
+  password: {{ $pw | quote }}
+  database: {{ $db | quote }}
+  dsn: {{ printf "postgres://%s:%s@%s.%s.svc:5432/%s?sslmode=disable" $user $pw $svc .Release.Namespace $db | quote }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $svc }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "parallax.labels" . | nindent 4 }}
+    app.kubernetes.io/component: localpostgres
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "parallax.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: localpostgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $svc }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "parallax.labels" . | nindent 4 }}
+    app.kubernetes.io/component: localpostgres
+spec:
+  serviceName: {{ $svc }}
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "parallax.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: localpostgres
+  template:
+    metadata:
+      labels:
+        {{- include "parallax.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: localpostgres
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 70
+        runAsGroup: 70
+        fsGroup: 70
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: postgres
+          image: {{ .Values.db.localPostgres.image }}
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: POSTGRES_USER
+              value: {{ $user | quote }}
+            - name: POSTGRES_DB
+              value: {{ $db | quote }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "parallax.localPostgres.secretName" . }}
+                  key: password
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - name: postgres
+              containerPort: 5432
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", {{ $user | quote }}, "-d", {{ $db | quote }}]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", {{ $user | quote }}, "-d", {{ $db | quote }}]
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.db.localPostgres.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with .Values.db.localPostgres.storageClassName }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.db.localPostgres.storage }}
+{{- end }}

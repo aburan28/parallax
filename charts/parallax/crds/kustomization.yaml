@@ -1,0 +1,17 @@
+# CRD kustomization.
+#
+# The referenced files are GENERATED — run `make manifests` from the repo root
+# first (controller-gen writes CRD YAML here from the api/v1alpha1 markers).
+# Until then `kustomize build config/crd` will error on the missing files, which
+# is expected for the M0 scaffold (generated artifacts are not committed).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - parallax.dev_studies.yaml
+  - parallax.dev_trials.yaml
+  - parallax.dev_plugins.yaml
+  - parallax.dev_datasets.yaml
+# +kubebuilder:scaffold:crdkustomizeresource
+
+# TODO(m1): conversion webhook patches land with v1beta1 (DESIGN.md §17.8).

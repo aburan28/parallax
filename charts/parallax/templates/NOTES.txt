@@ -1,0 +1,33 @@
+parallax operator {{ .Chart.AppVersion }} installed as {{ include "parallax.fullname" . }} in namespace {{ .Release.Namespace }}.
+
+1. Check the operator is running:
+
+   kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "parallax.fullname" . }}
+
+2. Verify the CRDs are registered:
+
+   kubectl get crd studies.parallax.dev trials.parallax.dev plugins.parallax.dev datasets.parallax.dev
+
+{{- if .Values.metrics.enabled }}
+
+3. Scrape the operator's own metrics ({{ .Values.metrics.port }}/metrics — the only telemetry surface, no phone-home):
+
+   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "parallax.fullname" . }}-metrics {{ .Values.metrics.port }}:{{ .Values.metrics.port }}
+{{- end }}
+
+{{- if .Values.db.localPostgres.enabled }}
+
+WARNING: db.localPostgres is enabled — this bundled single-replica Postgres is for
+demos / air-gapped evaluation only. Use db.dsn.secretRef with an HA Postgres in production.
+{{- else if not .Values.db.dsn.secretRef.name }}
+
+NOTE: no results database is configured (db.dsn.secretRef is empty and localPostgres is off).
+Set one before running Studies at cluster/fleet fidelity; --local mode uses SQLite.
+{{- end }}
+
+Next: register plugins and apply a Study —
+
+   kubectl apply -f https://raw.githubusercontent.com/aburan28/parallax/main/examples/plugins/catalog.yaml
+   kubectl apply -f https://raw.githubusercontent.com/aburan28/parallax/main/examples/studies/capture-agent-throughput.yaml
+
+Docs: https://github.com/aburan28/parallax/blob/main/docs/DESIGN.md

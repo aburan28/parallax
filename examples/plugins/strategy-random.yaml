@@ -1,0 +1,17 @@
+# strategy-random: random search — the permanent sanity floor every other
+# strategy is measured against (DESIGN.md §14). Ships both as a plugin binary and
+# compiled into the operator/CLI for zero-dependency --local runs.
+apiVersion: parallax.dev/v1alpha1
+kind: Plugin
+metadata:
+  name: strategy-random
+spec:
+  kind: strategy
+  image: ghcr.io/aburan28/parallax-strategy-random:0.1.0
+  verify:
+    cosign:
+      keylessIdentity: "https://github.com/aburan28/parallax/.github/workflows/release.yaml@refs/tags/*"
+      rekor: true
+  config:
+    # Defaults; a Study's space.strategy.config overrides these per study.
+    seed: 17

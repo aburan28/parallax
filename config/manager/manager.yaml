@@ -1,0 +1,132 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: parallax-system
+  labels:
+    app.kubernetes.io/name: parallax
+    # Enforce the restricted Pod Security Standard on the operator namespace. §17.3
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: parallax-controller-manager
+  namespace: parallax-system
+  labels:
+    app.kubernetes.io/name: parallax
+    app.kubernetes.io/component: operator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: parallax
+      app.kubernetes.io/component: operator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: parallax
+        app.kubernetes.io/component: operator
+    spec:
+      serviceAccountName: parallax-controller-manager
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: plugin-installer
+          image: ghcr.io/aburan28/parallax-plugins:latest
+          command: ["/plugin-installer", "seed", "--src", "/plugins", "--dst", "/plugins-shared"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: plugins
+              mountPath: /plugins-shared
+      containers:
+        - name: manager
+          image: ghcr.io/aburan28/parallax-operator:latest
+          # Standard controller-runtime flags; parallax-specific config via PARALLAX_* env.
+          args:
+            - --health-probe-bind-address=:8081
+            - --metrics-bind-address=:8080
+            - --leader-elect
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: PARALLAX_PLUGIN_DIR
+              value: "/plugins-shared"
+            - name: PARALLAX_SOCKET_DIR
+              value: "/var/run/parallax"
+            - name: PARALLAX_AUTO_MIGRATE
+              value: "true"
+            # DSN provided out-of-band (Secret `parallax-db`, key `dsn`) in
+            # cluster mode; --local uses SQLite. Uncomment to wire BYO Postgres:
+            # - name: PARALLAX_DB_DSN
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: parallax-db
+            #       key: dsn
+          ports:
+            - name: metrics
+              containerPort: 8080
+            - name: health
+              containerPort: 8081
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: plugins
+              mountPath: /plugins-shared
+            - name: sockets
+              mountPath: /var/run/parallax
+            - name: tmp
+              mountPath: /tmp
+      terminationGracePeriodSeconds: 30
+      volumes:
+        - name: plugins
+          emptyDir: {}
+        - name: sockets
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}

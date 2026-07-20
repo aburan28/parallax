@@ -1,0 +1,17 @@
+# loaddriver-kapture: drives load through kapture's CaptureLoadTest / TrafficReplay
+# (DESIGN.md §5.1, §16). Maps a Study workload (dataset + rate + distribution) to
+# kapture load CRs and reads back per-shard run reports.
+apiVersion: parallax.dev/v1alpha1
+kind: Plugin
+metadata:
+  name: loaddriver-kapture
+spec:
+  kind: loaddriver
+  image: ghcr.io/aburan28/parallax-loaddriver-kapture:0.1.0
+  verify:
+    cosign:
+      keylessIdentity: "https://github.com/aburan28/parallax/.github/workflows/release.yaml@refs/tags/*"
+      rekor: true
+  config:
+    # Default replay engine when a workload doesn't pin one.
+    defaultEngine: builtin

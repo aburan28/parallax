@@ -1,0 +1,68 @@
+// Provider plugins evaluate SLIs over a trial's measurement window (DESIGN.md §5.1,
+// §11). provider-prometheus queries PromQL; provider-runreport reads kapture statuses.
+// Swap boundary: trial.
+syntax = "proto3";
+
+package parallax.plugin.v1;
+
+option go_package = "github.com/aburan28/parallax/proto/plugin/v1;pluginv1";
+
+service Provider {
+  rpc Capabilities(CapabilitiesRequest) returns (CapabilitiesResponse);
+  rpc Collect(CollectRequest) returns (CollectResponse);
+  rpc Snapshot(SnapshotRequest) returns (SnapshotResponse);
+}
+
+// Window is the recorded measurement window [t1, t2]. Times are RFC3339 strings so
+// the ABI carries no well-known-type dependency; providers cross-check against their
+// backend's server clock (DESIGN.md §9, "timestamps are law").
+message Window {
+  string t1_rfc3339 = 1;
+  string t2_rfc3339 = 2;
+}
+
+message SLIQuery {
+  string name = 1;
+  // One of the trust classes: fidelity | client | server | derived (§11).
+  string sli_class = 2;
+  // Provider-native query (e.g. PromQL); {{.Window}} is templated by the host.
+  string query = 3;
+  // Simple field expression for status-scraping providers (e.g. runreport).
+  string expr = 4;
+}
+
+message SLIValue {
+  string name = 1;
+  string sli_class = 2;
+  double value = 3;
+  string query = 4;
+  string evaluated_at_rfc3339 = 5;
+  bool ok = 6;
+  string detail = 7;
+}
+
+message CapabilitiesRequest {}
+
+message CapabilitiesResponse {
+  repeated string supported_classes = 1;
+  bool supports_snapshot = 2;
+}
+
+message CollectRequest {
+  Window window = 1;
+  repeated SLIQuery queries = 2;
+}
+
+message CollectResponse {
+  repeated SLIValue values = 1;
+}
+
+message SnapshotRequest {
+  Window window = 1;
+}
+
+message SnapshotResponse {
+  string artifact_uri = 1;
+  string digest = 2;
+  int64 bytes = 3;
+}

@@ -1,0 +1,25 @@
+# Default kustomize composition: CRDs + RBAC + manager, deployed into
+# namespace parallax-system with a common name prefix.
+#
+# Usage (after `make manifests` has populated config/crd):
+#   kubectl apply -k config/default
+#
+# This mirrors the Helm chart's posture (restricted PSS, least-privilege RBAC)
+# for GitOps users who prefer raw kustomize over Helm.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: parallax-system
+
+namePrefix: parallax-
+
+commonLabels:
+  app.kubernetes.io/name: parallax
+  app.kubernetes.io/part-of: parallax
+
+resources:
+  - ../crd
+  - ../rbac
+  - ../manager
+# TODO(m2): add ../network-policy and ../prometheus (ServiceMonitor) overlays
+# to match the chart once those manifests are generated.

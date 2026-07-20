@@ -1,0 +1,14 @@
+# target-kapture: the flagship dogfood target (DESIGN.md §4.1, §8.1).
+# Tunes kapture's own capture-agent (buffering, compression, HPA, storage) and
+# calibrates the load instrument used for every other study.
+apiVersion: parallax.dev/v1alpha1
+kind: Plugin
+metadata:
+  name: target-kapture
+spec:
+  kind: target
+  image: ghcr.io/aburan28/parallax-target-kapture:0.1.0
+  verify:
+    cosign:
+      keylessIdentity: "https://github.com/aburan28/parallax/.github/workflows/release.yaml@refs/tags/*"
+      rekor: true

@@ -1,0 +1,45 @@
+// Scenario plugins inject faults during validation experiments (DESIGN.md §5.1,
+// §13.3): pod-kill, netpol-outage, rate-burst, hpa-ramp. Swap boundary: trial.
+syntax = "proto3";
+
+package parallax.plugin.v1;
+
+option go_package = "github.com/aburan28/parallax/proto/plugin/v1;pluginv1";
+
+service Scenario {
+  // Inject begins the fault and streams lifecycle events until injected.
+  rpc Inject(InjectRequest) returns (stream ScenarioEvent);
+  // Verify asserts the scenario's success/health predicates.
+  rpc Verify(VerifyRequest) returns (VerifyResponse);
+  // Revert restores the pre-scenario state (idempotent).
+  rpc Revert(RevertRequest) returns (RevertResponse);
+}
+
+message InjectRequest {
+  bytes config_json = 1;
+  string trial_id = 2;
+}
+
+message ScenarioEvent {
+  string phase = 1;
+  string detail = 2;
+  int64 at_unix_nano = 3;
+}
+
+message VerifyRequest {
+  string trial_id = 1;
+}
+
+message VerifyResponse {
+  bool ok = 1;
+  bytes verdict_json = 2;
+}
+
+message RevertRequest {
+  string trial_id = 1;
+}
+
+message RevertResponse {
+  bool ok = 1;
+  string detail = 2;
+}

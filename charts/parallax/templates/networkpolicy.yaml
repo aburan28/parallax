@@ -1,0 +1,69 @@
+{{- if .Values.networkPolicy.enabled -}}
+# Default-deny ingress with explicit allows (DESIGN.md §17.3).
+# Ingress: only the metrics port, only from allowed namespaces (or same namespace).
+# Egress: DNS + Kubernetes API + Postgres; the Trial controller's benchmark-cluster
+# egress is over the API/gRPC of the target cluster and is intentionally broad in M0.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "parallax.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "parallax.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "parallax.operatorSelectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    {{- if .Values.metrics.enabled }}
+    - from:
+        {{- if .Values.networkPolicy.metricsNamespaceSelector }}
+        - namespaceSelector:
+            {{- toYaml .Values.networkPolicy.metricsNamespaceSelector | nindent 12 }}
+        {{- else }}
+        - podSelector: {}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.metrics.port }}
+    {{- end }}
+    # Health probes come from the kubelet (node IP); left open on the health port.
+    - ports:
+        - protocol: TCP
+          port: {{ .Values.operator.healthProbe.port }}
+  egress:
+    # DNS
+    - to: []
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Kubernetes API server
+    - to:
+        {{- range .Values.networkPolicy.apiServerCIDRs }}
+        - ipBlock:
+            cidr: {{ . }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 6443
+    # Postgres results DB (BYO or local).
+    - to:
+        {{- if .Values.db.localPostgres.enabled }}
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ include "parallax.name" . }}
+              app.kubernetes.io/component: localpostgres
+        {{- else }}
+        - {}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: 5432
+{{- end }}

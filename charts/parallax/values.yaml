@@ -1,0 +1,154 @@
+# Default values for the parallax operator chart.
+# Every field is enterprise-safe by default: restricted Pod Security Standard,
+# least-privilege RBAC, NetworkPolicies on, no telemetry phone-home (DESIGN.md §17).
+
+# -- Override the generated resource name prefix (defaults to the release name).
+nameOverride: ""
+fullnameOverride: ""
+
+# CRDs are shipped under charts/parallax/crds and installed by Helm by default.
+# Set to false when CRDs are managed out-of-band (GitOps / `kubectl apply -k config/crd`).
+installCRDs: true
+
+operator:
+  image: ghcr.io/aburan28/parallax-operator
+  tag: ""            # defaults to .Chart.AppVersion when empty
+  pullPolicy: IfNotPresent
+  imagePullSecrets: []
+
+  # HA leader election is auto-meaningful at replicas > 1 (DESIGN.md §17.6).
+  replicas: 1
+  leaderElection:
+    enabled: true
+    # Lease resource name; must be stable across a rolling upgrade.
+    id: parallax-operator-leader
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  # Extra flags appended to the manager command (tracks cmd/parallax-operator).
+  extraArgs: []
+  # Extra environment variables for the manager container.
+  extraEnv: []
+
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  # Spread replicas across nodes for HA when replicas > 1.
+  topologySpreadConstraints: []
+  priorityClassName: ""
+
+  # Health/readiness probe endpoints (served by the manager on the health port).
+  healthProbe:
+    port: 8081
+
+# Restricted Pod Security Standard posture (DESIGN.md §17.3).
+# distroless nonroot + read-only rootfs + no-new-privileges + RuntimeDefault seccomp.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  privileged: false
+  capabilities:
+    drop:
+      - ALL
+  seccompProfile:
+    type: RuntimeDefault
+
+serviceAccount:
+  # Create a dedicated ServiceAccount for the operator.
+  create: true
+  # Name to use; generated from the fullname when empty.
+  name: ""
+  annotations: {}          # e.g. IRSA / Workload Identity bindings
+  automountServiceAccountToken: true
+
+rbac:
+  # Create the least-privilege ClusterRole + binding (DESIGN.md §17.3).
+  create: true
+
+# Plugin host configuration (DESIGN.md §5).
+# pluginDir is a writable shared volume the plugin-installer initContainer seeds
+# with the first-party plugin binaries and the host hot-reloads on change.
+pluginDir: /plugins
+socketDir: /var/run/parallax
+pluginImage:
+  # Distroless image carrying the baked first-party plugin binaries + plugin-installer
+  # under /plugins (see Dockerfile.plugins). Empty disables the init container.
+  repository: ghcr.io/aburan28/parallax-plugins
+  tag: ""                 # defaults to .Chart.AppVersion when empty
+  pullPolicy: IfNotPresent
+# Skip cosign verification of plugin images (dev only; production leaves this false). §5.5
+skipPluginVerify: false
+
+# Results database (DESIGN.md §15). BYO Postgres is the enterprise default;
+# localPostgres mirrors kapture's history.localPostgres for turnkey demos.
+db:
+  # dsn.secretRef points at a Secret holding key `dsn` with a full connection
+  # string, e.g. postgres://user:pass@host:5432/parallax?sslmode=require .
+  # Leave name empty to use localPostgres (below) or the --local SQLite path.
+  dsn:
+    secretRef:
+      name: ""
+      key: dsn
+  # autoMigrate applies embedded migrations on startup (DESIGN.md §15).
+  autoMigrate: true
+  # localPostgres: an in-cluster single-replica Postgres for demos / air-gapped
+  # kicking-the-tyres. NOT for production — bring your own HA Postgres there.
+  # Mirrors kapture history.localPostgres.{enabled,image,storage}.
+  localPostgres:
+    enabled: false
+    image: postgres:16-alpine
+    storage: 8Gi
+    storageClassName: ""
+    database: parallax
+    username: parallax
+    # If empty, a random password is generated into a Secret on first install.
+    password: ""
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi
+
+# Operator's own Prometheus endpoint — the ONLY metrics surface; zero phone-home. §17.3
+metrics:
+  enabled: true
+  port: 8080
+  service:
+    annotations: {}
+
+# ServiceMonitor for Prometheus Operator scraping (guarded; requires the CRD). §A.3 gap K1.
+serviceMonitor:
+  enabled: false
+  interval: 15s
+  scrapeTimeout: 10s
+  namespace: ""            # defaults to the release namespace
+  labels: {}               # e.g. release: kube-prometheus-stack
+  relabelings: []
+  metricRelabelings: []
+
+# Ship default-deny-ish NetworkPolicies with the chart (DESIGN.md §17.3).
+networkPolicy:
+  enabled: true
+  # CIDRs the operator may reach for the Kubernetes API server egress.
+  # Empty allows all egress to the API (kube-apiserver has no stable label set).
+  apiServerCIDRs: []
+  # Namespaces allowed to scrape the metrics port (label selector match).
+  metricsNamespaceSelector: {}

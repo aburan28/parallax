@@ -1,0 +1,13 @@
+# Sample CRs, applyable with `kubectl apply -k config/samples`.
+# The Study samples reference plugins (target-*, provider-*, strategy-*) and a
+# Dataset that must exist first — apply config/samples/parallax.dev_v1alpha1_plugin.yaml
+# (and the examples/plugins catalog) and the Dataset before the Studies.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - parallax.dev_v1alpha1_plugin.yaml
+  - parallax.dev_v1alpha1_dataset.yaml
+  - parallax.dev_v1alpha1_study_capture-agent-throughput.yaml
+  - parallax.dev_v1alpha1_study_checkout-latency-bakeoff.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples

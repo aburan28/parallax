@@ -1,0 +1,158 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "parallax.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "parallax.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.operator.replicas }}
+  selector:
+    matchLabels:
+      {{- include "parallax.operatorSelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "parallax.operatorSelectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "parallax.serviceAccountName" . }}
+      {{- with .Values.operator.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- with .Values.operator.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with .Values.operator.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.operator.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.operator.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.operator.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.pluginImage.repository }}
+      initContainers:
+        # Seeds the shared plugin volume with the baked first-party plugin
+        # binaries (Dockerfile.plugins stages them under /plugins). The host then
+        # discovers + hot-reloads them; Plugin CRs can overlay OCI-delivered ones.
+        - name: plugin-installer
+          image: {{ include "parallax.pluginImage" . }}
+          imagePullPolicy: {{ .Values.pluginImage.pullPolicy }}
+          # src is the image's baked /plugins; dst is the shared volume staged at
+          # a DISTINCT path so the mount does not hide the baked binaries.
+          command: ["/plugin-installer", "seed", "--src", "/plugins", "--dst", "/plugins-shared"]
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: plugins
+              mountPath: /plugins-shared
+      {{- end }}
+      containers:
+        - name: manager
+          image: {{ include "parallax.image" . }}
+          imagePullPolicy: {{ .Values.operator.pullPolicy }}
+          # Standard controller-runtime flags (agent D's manager wires these).
+          # Parallax-specific config goes through PARALLAX_* env below — env is
+          # forgiving of unknown keys, so the pod never crash-loops on a flag
+          # mismatch during concurrent scaffold development.
+          args:
+            - --health-probe-bind-address=:{{ .Values.operator.healthProbe.port }}
+            {{- if .Values.metrics.enabled }}
+            - --metrics-bind-address=:{{ .Values.metrics.port }}
+            {{- else }}
+            - --metrics-bind-address=0
+            {{- end }}
+            {{- if .Values.operator.leaderElection.enabled }}
+            - --leader-elect
+            {{- end }}
+            {{- with .Values.operator.extraArgs }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: PARALLAX_PLUGIN_DIR
+              value: {{ .Values.pluginDir | quote }}
+            - name: PARALLAX_SOCKET_DIR
+              value: {{ .Values.socketDir | quote }}
+            - name: PARALLAX_AUTO_MIGRATE
+              value: {{ .Values.db.autoMigrate | quote }}
+            - name: PARALLAX_SKIP_PLUGIN_VERIFY
+              value: {{ .Values.skipPluginVerify | quote }}
+            {{- if .Values.operator.leaderElection.enabled }}
+            - name: PARALLAX_LEADER_ELECTION_ID
+              value: {{ .Values.operator.leaderElection.id | quote }}
+            {{- end }}
+            {{- if .Values.db.localPostgres.enabled }}
+            - name: PARALLAX_DB_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "parallax.localPostgres.secretName" . }}
+                  key: dsn
+            {{- else if .Values.db.dsn.secretRef.name }}
+            - name: PARALLAX_DB_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.db.dsn.secretRef.name }}
+                  key: {{ .Values.db.dsn.secretRef.key }}
+            {{- end }}
+            {{- with .Values.operator.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            {{- if .Values.metrics.enabled }}
+            - name: metrics
+              containerPort: {{ .Values.metrics.port }}
+              protocol: TCP
+            {{- end }}
+            - name: health
+              containerPort: {{ .Values.operator.healthProbe.port }}
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.operator.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            # read-only rootfs: everything the process writes lives on a volume.
+            - name: plugins
+              mountPath: {{ .Values.pluginDir }}
+            - name: sockets
+              mountPath: {{ .Values.socketDir }}
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: plugins
+          emptyDir: {}
+        - name: sockets
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}

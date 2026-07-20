@@ -1,0 +1,144 @@
+{{- if .Values.rbac.create -}}
+# Least-privilege ClusterRole for the parallax manager (DESIGN.md §17.3).
+#
+# The manager is one binary running four reconcilers, so a single ServiceAccount
+# is bound here. The rule blocks below document the per-controller split the
+# design intends; only the **Trial controller** ever touches a benchmark cluster
+# (kapture CaptureLoadTest/TrafficReplay, the SUT's Jobs/Pods, and the
+# short-lived clusterRef kubeconfig Secrets). Study/Plugin/Dataset controllers
+# stay entirely within the control plane. When the controllers are split into
+# separate ServiceAccounts (post-M0), carve the marked block into its own Role.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "parallax.fullname" . }}-manager
+  labels:
+    {{- include "parallax.labels" . | nindent 4 }}
+rules:
+  # ---- Parallax CRDs — owned by Study/Trial/Plugin/Dataset controllers ----
+  - apiGroups: ["parallax.dev"]
+    resources:
+      - studies
+      - trials
+      - datasets
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["parallax.dev"]
+    resources:
+      - studies/status
+      - trials/status
+      - datasets/status
+      - plugins/status
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["parallax.dev"]
+    resources:
+      - studies/finalizers
+      - trials/finalizers
+      - datasets/finalizers
+      - plugins/finalizers
+    verbs: ["update"]
+  # Plugin is cluster-scoped and reconciled by the plugin host (install/verify);
+  # the controller mutates spec-adjacent metadata (finalizers) + status only.
+  - apiGroups: ["parallax.dev"]
+    resources:
+      - plugins
+    verbs: ["get", "list", "watch", "update", "patch"]
+
+  # ---- Events — all controllers emit them for cluster-side audit (§17.5) ----
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+
+  # ---- Leader election — HA manager coordination (§17.6) ----
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  # ---- Config/Secrets the control plane reads ----
+  # Secrets: db DSN, plugin registry pulls, and (Trial controller) benchmark
+  # clusterRef kubeconfigs. Scoped to read + the Dataset/Plugin controllers'
+  # need to watch. Consider a namespaced Role for tighter scoping post-M0.
+  - apiGroups: [""]
+    resources: ["secrets", "configmaps"]
+    verbs: ["get", "list", "watch"]
+
+  # ==================================================================
+  # TRIAL CONTROLLER ONLY — benchmark-cluster surface.
+  # In cluster/fleet mode these objects live in a *remote* benchmark cluster
+  # reached via a clusterRef kubeconfig; in --local they are co-located, so the
+  # rules must exist here. No other controller uses anything below this line.
+  # ==================================================================
+  # kapture load-generation CRs (the load path — DESIGN.md §16, Appendix A.1).
+  - apiGroups: ["capture.gateway.io"]
+    resources:
+      - captureloadtests
+      - trafficreplays
+      - trafficcaptures
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["capture.gateway.io"]
+    resources:
+      - captureloadtests/status
+      - trafficreplays/status
+    verbs: ["get"]
+  # Direct-mode engine Jobs and the SUT health gate (Pods).
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  # SUT rollout gate for direct/integrated target modes.
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "parallax.fullname" . }}-manager
+  labels:
+    {{- include "parallax.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "parallax.fullname" . }}-manager
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "parallax.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+---
+# Namespaced Role for leader-election lease + operator-local config in the
+# install namespace (kept separate from the cluster-wide rules above).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "parallax.fullname" . }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "parallax.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "parallax.fullname" . }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "parallax.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "parallax.fullname" . }}-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "parallax.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

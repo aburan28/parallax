@@ -1,0 +1,14 @@
+version: v2
+managed:
+  enabled: false
+plugins:
+  # Local plugins (installed by `make tools` into $(LOCALBIN)); avoids a BSR
+  # round-trip so `make proto` works air-gapped once the toolchain is present.
+  - local: protoc-gen-go
+    out: proto
+    opt:
+      - paths=source_relative
+  - local: protoc-gen-go-grpc
+    out: proto
+    opt:
+      - paths=source_relative

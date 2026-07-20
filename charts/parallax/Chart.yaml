@@ -1,0 +1,33 @@
+apiVersion: v2
+name: parallax
+description: >-
+  Enterprise-grade Kubernetes operator for benchmarking and experimentation —
+  Study/Trial/Plugin/Dataset CRDs, a hot-reloadable gRPC plugin host, and a
+  durable Postgres/SQLite results store. Powered by kapture.
+type: application
+
+# Chart version tracks the chart's own packaging; appVersion tracks the
+# operator image this chart deploys by default (overridable via values).
+version: 0.1.0
+appVersion: "0.1.0"
+
+kubeVersion: ">=1.28.0-0"
+
+home: https://github.com/aburan28/parallax
+sources:
+  - https://github.com/aburan28/parallax
+keywords:
+  - benchmarking
+  - experimentation
+  - performance
+  - operator
+  - kapture
+  - hpo
+maintainers:
+  - name: The Parallax Authors
+    url: https://github.com/aburan28/parallax
+
+annotations:
+  # Apache-2.0 across platform, plugins, and charts — no open-core split (DESIGN.md §17.1).
+  artifacthub.io/license: Apache-2.0
+  artifacthub.io/operator: "true"

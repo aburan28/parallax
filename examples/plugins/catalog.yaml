@@ -1,0 +1,94 @@
+# Example Plugin catalog: how parallax loads its extension points.
+# Each Plugin CR names an OCI image; the plugin controller verifies the
+# signature, resolves the digest, installs the binary into the shared
+# plugin volume, and the host hot-reloads it (drain-and-swap). Updating
+# `image` (new tag or digest) IS the upgrade path — and re-pointing at
+# the previous digest is the rollback. See docs/DESIGN.md §5.
+---
+apiVersion: parallax.dev/v1alpha1
+kind: Plugin
+metadata:
+  name: target-kapture
+spec:
+  kind: target
+  image: ghcr.io/aburan28/parallax-target-kapture:0.1.0
+  verify:
+    cosign:
+      keylessIdentity: "https://github.com/aburan28/parallax/.github/workflows/release.yaml@refs/tags/*"
+      rekor: true
+---
+apiVersion: parallax.dev/v1alpha1
+kind: Plugin
+metadata:
+  name: provider-prometheus
+spec:
+  kind: provider
+  image: ghcr.io/aburan28/parallax-provider-prometheus:0.1.0
+  verify:
+    cosign:
+      keylessIdentity: "https://github.com/aburan28/parallax/.github/workflows/release.yaml@refs/tags/*"
+      rekor: true
+  config:
+    # Any PromQL-compatible endpoint: Prometheus, Thanos, Mimir, VictoriaMetrics.
+    endpoint: http://prometheus.monitoring:9090
+    scrapeIntervalHint: 5s
+---
+apiVersion: parallax.dev/v1alpha1
+kind: Plugin
+metadata:
+  name: provider-otlp
+spec:
+  kind: provider
+  image: ghcr.io/aburan28/parallax-provider-otlp:0.1.0
+  verify:
+    cosign:
+      keylessIdentity: "https://github.com/aburan28/parallax/.github/workflows/release.yaml@refs/tags/*"
+      rekor: true
+  config:
+    listen: :4317          # SUTs / engines push OTel metrics here during trials
+---
+apiVersion: parallax.dev/v1alpha1
+kind: Plugin
+metadata:
+  name: strategy-optuna
+spec:
+  kind: strategy
+  # Digest-pinned third-party example; org policy may require this form.
+  image: ghcr.io/example/parallax-strategy-optuna@sha256:9f2c4e8a1b7d3f60c5e2a9d8b4f1c7e3a6d0b2f8c4e1a7d3b6f0c2e8a4d1b7f3
+  verify:
+    cosign:
+      keylessIdentity: "https://github.com/example/parallax-plugins/.github/workflows/release.yaml@refs/tags/*"
+      rekor: true
+    requireDigestPin: true
+  config:
+    sampler: tpe
+    multivariate: true
+  namespaceSelector:        # only these namespaces may reference it in Studies
+    matchLabels: { team: platform }
+---
+apiVersion: parallax.dev/v1alpha1
+kind: Plugin
+metadata:
+  name: scenario-pod-kill
+spec:
+  kind: scenario
+  image: ghcr.io/aburan28/parallax-scenario-pod-kill:0.1.0
+  verify:
+    cosign:
+      keylessIdentity: "https://github.com/aburan28/parallax/.github/workflows/release.yaml@refs/tags/*"
+      rekor: true
+---
+apiVersion: parallax.dev/v1alpha1
+kind: Plugin
+metadata:
+  name: exporter-webhook
+spec:
+  kind: exporter
+  image: ghcr.io/aburan28/parallax-exporter-webhook:0.1.0
+  verify:
+    cosign:
+      keylessIdentity: "https://github.com/aburan28/parallax/.github/workflows/release.yaml@refs/tags/*"
+      rekor: true
+  config:
+    url: https://hooks.internal.example.com/parallax
+    events: [StudySelected, StudyValidated, StudyPromoted, StudyRejected]

@@ -1,0 +1,69 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  # Match the toolchain pinned in go.mod / the scaffold contract.
+  GO_VERSION: "1.25.0"
+
+jobs:
+  # Fails if committed generated code (deepcopy, proto, CRDs) is stale.
+  generate-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: Install code-gen tools
+        run: make tools
+      - name: Regenerate (buf + controller-gen) and manifests
+        run: |
+          make generate
+          make manifests
+      - name: Verify no diff (generated code is committed and up to date)
+        run: |
+          if ! git diff --exit-code; then
+            echo "::error::generated code is stale — run 'make generate && make manifests' and commit the result"
+            git --no-pager diff --stat
+            exit 1
+          fi
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: Build (CGO_ENABLED=0)
+        run: make build
+      - name: Vet
+        run: make vet
+      - name: Test
+        run: make test
+
+  # gofmt gate kept separate so a formatting nit doesn't mask a real build break.
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l $(git ls-files '*.go' | grep -v -e '\.pb\.go$' -e 'zz_generated'))"
+          if [ -n "${unformatted}" ]; then
+            echo "::error::these files need gofmt:"; echo "${unformatted}"; exit 1
+          fi

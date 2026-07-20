@@ -1,0 +1,50 @@
+# syntax=docker/dockerfile:1
+# Multi-stage build for the parallax operator (manager).
+# Produces a distroless, nonroot, static image (CGO_ENABLED=0 — pure-Go sqlite).
+
+# ---- builder ----------------------------------------------------------------
+FROM golang:1.25-bookworm AS builder
+
+ARG TARGETOS
+ARG TARGETARCH
+# Version stamp (see Makefile LDFLAGS / internal/version).
+ARG VERSION=v0.0.0-dev
+ARG VCS_REF=unknown
+
+WORKDIR /workspace
+
+# Cache modules first.
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
+
+# Source.
+COPY api/ api/
+COPY cmd/ cmd/
+COPY internal/ internal/
+COPY pkg/ pkg/
+COPY proto/ proto/
+COPY migrations/ migrations/
+
+# Build the manager. CGO disabled so modernc.org/sqlite links pure-Go.
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} \
+    go build -trimpath \
+      -ldflags "-s -w -X github.com/aburan28/parallax/internal/version.Version=${VERSION} -X github.com/aburan28/parallax/internal/version.VCSRef=${VCS_REF}" \
+      -o /out/parallax-operator ./cmd/parallax-operator
+
+# ---- runtime ----------------------------------------------------------------
+FROM gcr.io/distroless/static:nonroot
+
+LABEL org.opencontainers.image.title="parallax-operator" \
+      org.opencontainers.image.source="https://github.com/aburan28/parallax" \
+      org.opencontainers.image.licenses="Apache-2.0"
+
+WORKDIR /
+COPY --from=builder /out/parallax-operator /parallax-operator
+
+# distroless nonroot: uid/gid 65532, no shell, no package manager.
+USER 65532:65532
+
+ENTRYPOINT ["/parallax-operator"]

@@ -1,0 +1,58 @@
+# syntax=docker/dockerfile:1
+# Multi-stage build for the parallax first-party plugins + plugin-installer.
+# The resulting distroless image stages every plugin binary under /plugins and
+# ships /plugin-installer as the entrypoint. Deployments run it as an initContainer
+# to seed the operator's shared plugin volume (see charts + config/manager).
+
+# ---- builder ----------------------------------------------------------------
+FROM golang:1.25-bookworm AS builder
+
+ARG TARGETOS
+ARG TARGETARCH
+ARG VERSION=v0.0.0-dev
+ARG VCS_REF=unknown
+
+WORKDIR /workspace
+
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
+
+COPY api/ api/
+COPY cmd/ cmd/
+COPY internal/ internal/
+COPY pkg/ pkg/
+COPY proto/ proto/
+COPY migrations/ migrations/
+
+# Build the installer and every plugin main as parallax-<dir> under /plugins.
+# The binary naming (parallax-<kind>-<name>) is what the host discovers in PluginDir.
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    set -eux; \
+    export CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64}; \
+    LDFLAGS="-s -w -X github.com/aburan28/parallax/internal/version.Version=${VERSION} -X github.com/aburan28/parallax/internal/version.VCSRef=${VCS_REF}"; \
+    mkdir -p /plugins; \
+    go build -trimpath -ldflags "${LDFLAGS}" -o /plugin-installer ./cmd/plugin-installer; \
+    for d in cmd/plugins/*/; do \
+      name="$(basename "$d")"; \
+      echo "building parallax-${name}"; \
+      go build -trimpath -ldflags "${LDFLAGS}" -o "/plugins/parallax-${name}" "./${d}"; \
+    done
+
+# ---- runtime ----------------------------------------------------------------
+FROM gcr.io/distroless/static:nonroot
+
+LABEL org.opencontainers.image.title="parallax-plugins" \
+      org.opencontainers.image.source="https://github.com/aburan28/parallax" \
+      org.opencontainers.image.licenses="Apache-2.0"
+
+WORKDIR /
+COPY --from=builder /plugin-installer /plugin-installer
+COPY --from=builder /plugins /plugins
+
+USER 65532:65532
+
+# Default: seed a mounted volume. Deployments override --dst to the shared path.
+ENTRYPOINT ["/plugin-installer"]
+CMD ["seed", "--src", "/plugins", "--dst", "/plugins-shared"]

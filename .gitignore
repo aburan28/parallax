@@ -1,0 +1,37 @@
+# Binaries
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+
+# Go
+vendor/
+*.prof
+coverage.txt
+coverage.html
+
+# Local databases / artifacts (--local mode)
+*.db
+*.db-shm
+*.db-wal
+/.parallax/
+/local-artifacts/
+
+# Tool binaries installed by `make tools`
+/hack/bin/
+
+# Editor / OS junk
+.DS_Store
+._*
+.idea/
+.vscode/
+*.swp
+
+# Kubeconfig captured by env-up
+/hack/kind-kubeconfig
+
+# stray root build artifacts
+/parallax
+/parallax-operator
+/plugin-installer

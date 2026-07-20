@@ -1,0 +1,114 @@
+# Flagship dogfood study: tune kapture's own capture-agent data plane.
+# Screens the flag-level knobs in `direct` mode on kind, validates the
+# CR-expressible survivors in `integrated` mode. See docs/DESIGN.md §8.
+apiVersion: parallax.dev/v1alpha1
+kind: Study
+metadata:
+  name: capture-agent-throughput
+  namespace: bench
+spec:
+  target:
+    plugin: target-kapture
+    config:
+      chartRef: { repo: ../kapture/charts/kapture, version: ">=0.1" }
+      namespace: capture-system
+      mode: direct
+
+  baseline:
+    name: shipped-defaults
+    values: {}   # batchSize=100, flushInterval=5s, writeQueueSize=4096, maxBodyBytes=1MiB
+
+  space:
+    dimensions:
+      - name: agent.batchSize            # capture-agent --batch-size
+        int: { min: 50, max: 2000, log: true }
+      - name: agent.flushInterval        # --flush-interval
+        categorical: { values: [1s, 5s, 15s] }
+      - name: agent.writeQueueSize       # --write-queue-size
+        int: { min: 1024, max: 65536, log: true }
+      - name: agent.maxBodyBytes         # --max-body-bytes
+        categorical: { values: [262144, 1048576, 4194304] }
+      - name: agent.resources.cpuLimit
+        categorical: { values: [500m, 1000m, 2000m] }
+      - name: agent.replicas
+        int: { min: 1, max: 6 }
+    constraints:
+      - "agent.batchSize * int(agent.maxBodyBytes) <= 2147483648"
+    strategy:
+      plugin: strategy-random
+      config: { points: 40, seed: 17 }
+
+  workloads:
+    - name: steady-2k
+      datasetRef: { name: prod-edge-2026-07-14 }
+      replay:
+        engine: builtin
+        rate: { mode: Constant, requestsPerSecond: 2000 }
+        distribution: { cells: [bench-a], workersPerSpoke: 2, concurrencyPerWorker: 25 }
+        abort: { maxDuration: 10m, errorPercent: 10 }
+      warmup: 2m
+      measure: 5m
+      cooldown: 30s
+
+  slis:
+    - name: capture_loss_ratio
+      provider: readback
+    - name: capture_drop_ratio
+      provider: prometheus
+      query: |
+        sum(rate(capture_agent_requests_dropped_total[{{.Window}}]))
+          / sum(rate(capture_agent_requests_total[{{.Window}}]))
+    - name: queue_saturation_peak
+      provider: prometheus
+      query: |
+        max_over_time((capture_agent_write_queue_depth
+          / capture_agent_write_queue_capacity)[{{.Window}}:15s])
+    - name: replay_error_ratio
+      provider: runreport
+      expr: failedRequests / sentRequests
+    - name: client_p99_ms
+      provider: runreport
+      expr: p99LatencyMs
+    - name: agent_cpu_cores
+      provider: prometheus
+      query: |
+        sum(rate(container_cpu_usage_seconds_total{pod=~"capture-agent-.*"}[{{.Window}}]))
+    - name: capture_throughput_rps
+      provider: prometheus
+      query: |
+        sum(rate(capture_agent_requests_total[{{.Window}}]))
+    - name: cpu_seconds_per_1k_captured
+      provider: derived
+      expr: agent_cpu_cores * 1000 / capture_throughput_rps
+
+  guardrails:
+    - { sli: capture_loss_ratio, max: 0.0 }
+    - { sli: capture_drop_ratio, max: 0.0 }
+    - { sli: replay_error_ratio, max: 0.001 }
+    - { sli: client_p99_ms, maxRelativeToBaseline: 1.05 }
+    - provider: prometheus
+      query: 'sum(increase(capture_agent_storage_write_errors_total[{{.Window}}]))'
+      max: 0
+    - provider: prometheus
+      query: 'sum(increase(kube_pod_container_status_restarts_total{namespace="capture-system"}[{{.Window}}]))'
+      max: 0
+
+  objectives:
+    primary:   { sli: cpu_seconds_per_1k_captured, direction: minimize, minPracticalEffect: "5%" }
+    secondary:
+      - { sli: queue_saturation_peak, direction: minimize }
+
+  selection: { topK: 3, method: pareto-weighted }
+
+  validation:
+    reps: 5
+    alpha: 0.05
+    correction: holm
+    scenarios: [soak-30m, burst-3x, agent-kill, storage-outage-60s]
+
+  budgets: { maxTrials: 80, maxClusterTime: 12h, maxWallClock: 24h }
+
+  promotion:
+    approval: manual
+    output: golden/capture-agent-values.yaml
+    require: [validation.pass, scenarios.pass]

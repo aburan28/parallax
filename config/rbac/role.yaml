@@ -1,0 +1,68 @@
+# Least-privilege ClusterRole for the parallax manager (DESIGN.md §17.3).
+#
+# GENERATED-EQUIVALENT: `make manifests` regenerates this from the
+# +kubebuilder:rbac markers on the controllers (agent C). It is committed here as
+# a hand-authored, review-friendly baseline so the kustomize overlay is complete
+# before code generation runs. Keep it in sync with the chart's rbac.yaml.
+#
+# One binary, one ServiceAccount in M0. The comment blocks mark the per-controller
+# split the design intends; only the Trial controller touches a benchmark cluster.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: parallax-manager
+rules:
+  # ---- Parallax CRDs ----
+  - apiGroups: ["parallax.dev"]
+    resources: ["studies", "trials", "datasets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["parallax.dev"]
+    resources: ["plugins"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["parallax.dev"]
+    resources:
+      - studies/status
+      - trials/status
+      - datasets/status
+      - plugins/status
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["parallax.dev"]
+    resources:
+      - studies/finalizers
+      - trials/finalizers
+      - datasets/finalizers
+      - plugins/finalizers
+    verbs: ["update"]
+
+  # ---- Events + leader election (manager-wide) ----
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  # ---- Config/Secrets read by the control plane ----
+  - apiGroups: [""]
+    resources: ["secrets", "configmaps"]
+    verbs: ["get", "list", "watch"]
+
+  # ==== TRIAL CONTROLLER ONLY — benchmark-cluster surface ====
+  - apiGroups: ["capture.gateway.io"]
+    resources: ["captureloadtests", "trafficreplays", "trafficcaptures"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["capture.gateway.io"]
+    resources: ["captureloadtests/status", "trafficreplays/status"]
+    verbs: ["get"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets"]
+    verbs: ["get", "list", "watch"]

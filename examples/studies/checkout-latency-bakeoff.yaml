@@ -1,0 +1,103 @@
+# Generic-workload study: tune an application service (not kapture) under
+# replayed production traffic. `target-helm` maps dimensions to Helm value
+# paths; kapture's CaptureLoadTest supplies the load. See docs/DESIGN.md §8.
+apiVersion: parallax.dev/v1alpha1
+kind: Study
+metadata:
+  name: checkout-latency-bakeoff
+  namespace: shop-bench
+spec:
+  target:
+    plugin: target-helm
+    config:
+      chart: charts/checkout
+      release: checkout
+      namespace: shop
+      readiness:                       # health gate beyond rollout status
+        prometheus: 'sum(up{job="checkout"}) >= 2'
+
+  baseline:
+    name: prod-current
+    values:
+      resources: { limits: { cpu: 1000m, memory: 512Mi } }
+      env: { GOGC: "100" }
+
+  space:
+    dimensions:
+      - name: gogc
+        path: .env.GOGC                # explicit Helm value path mapping
+        categorical: { values: ["50", "100", "200", "400"] }
+      - name: gomemlimit
+        path: .env.GOMEMLIMIT
+        categorical: { values: ["", "400MiB", "460MiB"] }
+      - name: cpuLimit
+        path: .resources.limits.cpu
+        categorical: { values: [1000m, 2000m] }
+      - name: replicas
+        path: .replicaCount
+        int: { min: 2, max: 6 }
+    constraints:
+      - "gomemlimit == '' || cpuLimit != '1000m' || replicas >= 3"
+    strategy:
+      plugin: strategy-grid            # 4×3×2×5 = 120 points, pruned by constraints
+
+  workloads:
+    - name: prod-shape-1x
+      datasetRef: { name: shop-checkout-2026-07-10 }
+      replay:
+        engine: builtin
+        rate: { mode: OriginalTiming, timeScale: "1.0" }   # recorded burstiness
+        distribution: { cells: [bench-a] }
+        abort: { maxDuration: 12m, errorPercent: 5 }
+      warmup: 2m
+      measure: 8m
+      cooldown: 30s
+
+  slis:
+    - name: client_p99_ms
+      provider: runreport
+      expr: p99LatencyMs
+    - name: client_p50_ms
+      provider: runreport
+      expr: p50LatencyMs
+    - name: replay_error_ratio
+      provider: runreport
+      expr: failedRequests / sentRequests
+    - name: sut_cpu_cores
+      provider: prometheus
+      query: |
+        sum(rate(container_cpu_usage_seconds_total{namespace="shop",pod=~"checkout-.*"}[{{.Window}}]))
+    - name: sut_mem_peak_bytes
+      provider: prometheus
+      query: |
+        max_over_time(sum(container_memory_working_set_bytes{namespace="shop",pod=~"checkout-.*"})[{{.Window}}:15s])
+    - name: cost_score
+      provider: derived
+      expr: sut_cpu_cores + sut_mem_peak_bytes / 4e9   # 1 core ≈ 4GiB pricing ratio
+
+  guardrails:
+    - { sli: replay_error_ratio, max: 0.001 }
+    - { sli: client_p50_ms, maxRelativeToBaseline: 1.10 }
+    - provider: prometheus
+      query: 'sum(increase(kube_pod_container_status_restarts_total{namespace="shop"}[{{.Window}}]))'
+      max: 0
+
+  objectives:
+    primary:   { sli: client_p99_ms, direction: minimize, minPracticalEffect: "3%" }
+    secondary:
+      - { sli: cost_score, direction: minimize }
+
+  selection: { topK: 3, method: pareto-weighted }
+
+  validation:
+    reps: 6
+    alpha: 0.05
+    correction: holm
+    scenarios: [soak-30m, burst-3x]
+
+  budgets: { maxTrials: 150, maxClusterTime: 20h, maxWallClock: 48h }
+
+  promotion:
+    approval: manual
+    output: golden/checkout-values.yaml
+    require: [validation.pass, scenarios.pass]

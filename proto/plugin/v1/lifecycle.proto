@@ -1,0 +1,82 @@
+// The parallax plugin ABI (DESIGN.md §5.2). Every plugin — regardless of kind —
+// serves the Lifecycle service plus exactly one kind service (target, loaddriver,
+// provider, strategy, scenario, exporter) on the same gRPC server over a unix socket.
+//
+// Process contract (§5.2): the host launches the binary with the magic-cookie env
+// PARALLAX_PLUGIN_MAGIC=parallax-plugin and a socket-dir env; the plugin prints
+// exactly one stdout line `PARALLAX-PLUGIN|1|unix|<socket-path>|grpc` within 15s and
+// logs only to stderr. Discovery is by naming convention `parallax-<kind>-<name>`.
+syntax = "proto3";
+
+package parallax.plugin.v1;
+
+option go_package = "github.com/aburan28/parallax/proto/plugin/v1;pluginv1";
+
+// PluginKind enumerates the six extension seams (DESIGN.md §5.1).
+enum PluginKind {
+  PLUGIN_KIND_UNSPECIFIED = 0;
+  PLUGIN_KIND_TARGET = 1;
+  PLUGIN_KIND_LOADDRIVER = 2;
+  PLUGIN_KIND_PROVIDER = 3;
+  PLUGIN_KIND_STRATEGY = 4;
+  PLUGIN_KIND_SCENARIO = 5;
+  PLUGIN_KIND_EXPORTER = 6;
+}
+
+// BuildInfo is stamped at build time and recorded in the plugin_audit trail.
+message BuildInfo {
+  string version = 1;
+  string vcs_ref = 2;
+}
+
+// Lifecycle is implemented by every plugin. The host uses Describe for ABI version
+// negotiation, Configure for fail-fast config validation, Health for its supervisor
+// loop, and Drain for hot-reload / shutdown (idempotent).
+service Lifecycle {
+  rpc Describe(DescribeRequest) returns (DescribeResponse);
+  rpc Configure(ConfigureRequest) returns (ConfigureResponse);
+  rpc Health(HealthRequest) returns (HealthResponse);
+  rpc Drain(DrainRequest) returns (DrainResponse);
+}
+
+message DescribeRequest {
+  // ABI versions the host supports; the plugin picks one it also supports (N-1).
+  repeated string host_abi_versions = 1;
+}
+
+message DescribeResponse {
+  string name = 1;
+  PluginKind kind = 2;
+  repeated string abi_versions = 3;
+  // The version the plugin selected from host_abi_versions; empty ⇒ no overlap.
+  string selected_abi_version = 4;
+  // JSON Schema (draft 2020-12) for this plugin's config block.
+  string config_schema = 5;
+  repeated string capabilities = 6;
+  BuildInfo build = 7;
+}
+
+message ConfigureRequest {
+  // The CR-supplied config block, serialized as JSON.
+  bytes config_json = 1;
+  string abi_version = 2;
+}
+
+message ConfigureResponse {
+  bool accepted = 1;
+  // On rejection, a human-readable reason recorded verbatim in Plugin.status.
+  string reason = 2;
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  bool ok = 1;
+  string detail = 2;
+}
+
+message DrainRequest {
+  int64 grace_seconds = 1;
+}
+
+message DrainResponse {}

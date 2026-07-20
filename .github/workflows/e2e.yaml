@@ -1,0 +1,98 @@
+name: e2e
+
+# kind-based end-to-end skeleton, mirroring kapture's e2e recipe (Appendix A.5).
+# M0 exit criterion: a 1-point Study runs end-to-end on kind (--local), SLI rows
+# land in the DB, a report renders. The suite itself is filled in during M1 (the
+# steps below build + load images and stand up the env so it is ready to grow).
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [main]
+    paths:
+      - "cmd/**"
+      - "internal/**"
+      - "api/**"
+      - "charts/**"
+      - "hack/env-*.sh"
+      - "test/e2e/**"
+      - ".github/workflows/e2e.yaml"
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.25.0"
+  KIND_VERSION: "v0.25.0"
+  CLUSTER_NAME: parallax-e2e
+  IMAGE_TAG: e2e
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Build operator + plugin images (:e2e)
+        run: |
+          docker build -f Dockerfile.operator -t ghcr.io/aburan28/parallax-operator:${IMAGE_TAG} .
+          docker build -f Dockerfile.plugins  -t ghcr.io/aburan28/parallax-plugins:${IMAGE_TAG} .
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+        with:
+          version: ${{ env.KIND_VERSION }}
+          cluster_name: ${{ env.CLUSTER_NAME }}
+          node_image: kindest/node:v1.31.2
+
+      - name: Load images into kind
+        run: |
+          kind load docker-image ghcr.io/aburan28/parallax-operator:${IMAGE_TAG} --name ${CLUSTER_NAME}
+          kind load docker-image ghcr.io/aburan28/parallax-plugins:${IMAGE_TAG} --name ${CLUSTER_NAME}
+
+      - name: Install Gateway API CRDs + dev dependencies
+        # Reuses the same recipe as local dev; CLUSTER_NAME already exists so
+        # env-up.sh idempotently layers Gateway API + MinIO + Prometheus onto it.
+        run: |
+          CLUSTER_NAME=${CLUSTER_NAME} ./hack/env-up.sh
+
+      - name: Generate manifests and install CRDs
+        run: |
+          make tools
+          make manifests
+          kubectl apply -f charts/parallax/crds/ || kubectl apply -k config/crd
+
+      - name: Install the chart
+        run: |
+          helm upgrade --install parallax charts/parallax \
+            --namespace parallax-system --create-namespace \
+            --set operator.image=ghcr.io/aburan28/parallax-operator \
+            --set operator.tag=${IMAGE_TAG} \
+            --set pluginImage.repository=ghcr.io/aburan28/parallax-plugins \
+            --set pluginImage.tag=${IMAGE_TAG} \
+            --set db.localPostgres.enabled=true \
+            --wait --timeout 5m
+
+      - name: Run e2e suite (skeleton)
+        env:
+          # Gate mirrors kapture's E2E_CAPTUREHUB_NAME convention.
+          E2E_ENABLED: "false"
+        run: |
+          if [ "${E2E_ENABLED}" != "true" ]; then
+            echo "e2e suite is a skeleton for M0 — env stood up, tests land in M1 (see test/e2e/README.md)"
+            exit 0
+          fi
+          go test ./test/e2e/... -count=1 -timeout 30m
+
+      - name: Dump diagnostics on failure
+        if: failure()
+        run: |
+          kubectl get pods -A || true
+          kubectl -n parallax-system describe deploy -l app.kubernetes.io/name=parallax || true
+          kubectl -n parallax-system logs -l app.kubernetes.io/name=parallax --tail=200 || true

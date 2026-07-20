@@ -1,0 +1,15 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: parallax-manager
+  labels:
+    app.kubernetes.io/name: parallax
+    app.kubernetes.io/component: operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: parallax-manager
+subjects:
+  - kind: ServiceAccount
+    name: parallax-controller-manager
+    namespace: parallax-system
