@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -109,12 +110,13 @@ func (r *StudyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 		r.Recorder.Eventf(&study, corev1.EventTypeNormal, "RunCreated", "results-DB run %d created", runID)
 	}
 
-	// 3. Materialize a single screening Trial CR for the baseline point (M0). The full
-	//    space expansion / strategy ask loop is TODO(m1).
-	if err := r.ensureScreeningTrial(ctx, &study); err != nil {
+	// 3. Materialize screening Trial CRs: the baseline point plus the strategy's
+	//    expansion of the search space, capped by the trial budget (§7, §8).
+	total, err := r.materializeSweep(ctx, &study)
+	if err != nil {
 		return ctrl.Result{}, err
 	}
-	study.Status.TrialsTotal = 1
+	study.Status.TrialsTotal = int32(total)
 
 	// 4. Advance Pending -> Sweeping once the run and first trial exist.
 	if study.Status.Phase == v1alpha1.StudyPhasePending {
@@ -142,13 +144,107 @@ func (r *StudyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	return ctrl.Result{}, nil
 }
 
-// ensureScreeningTrial creates the baseline screening Trial CR owned by the study, if it
-// does not already exist. Deterministic naming keeps it idempotent across reconciles.
-func (r *StudyReconciler) ensureScreeningTrial(ctx context.Context, study *v1alpha1.Study) error {
-	// Config hash of the baseline point; shared with `parallax select` so the CLI can
-	// identify the baseline row it recomputes (see space.BaselineHash).
-	configHash := space.BaselineHash(study.Spec)
+// screeningPoint is one config point to materialize as a screening trial.
+type screeningPoint struct {
+	configHash  string
+	assignments map[string]string // nil for the baseline point
+	isBaseline  bool
+}
 
+// strategyConfig is the small config block carried by grid/random strategies.
+type strategyConfig struct {
+	Points int   `json:"points"`
+	Seed   int64 `json:"seed"`
+}
+
+// materializeSweep creates the baseline screening trial plus the strategy's expansion
+// of the search space, capped by the trial budget, and returns the total count. It is
+// idempotent: trials are deterministically named by config hash, so re-reconciles skip
+// existing ones (DESIGN.md §7, §8).
+func (r *StudyReconciler) materializeSweep(ctx context.Context, study *v1alpha1.Study) (int, error) {
+	// The baseline point always screens; its hash matches space.BaselineHash so
+	// `parallax select` can identify the baseline row (§7, §12).
+	points := []screeningPoint{{configHash: space.BaselineHash(study.Spec), isBaseline: true}}
+
+	expanded, err := r.expandSweep(study)
+	if err != nil {
+		return 0, err
+	}
+	maxTrials := int(study.Spec.Budgets.MaxTrials)
+	for _, a := range expanded {
+		if maxTrials > 0 && len(points) >= maxTrials {
+			break // trial budget reached (§8 budgets)
+		}
+		points = append(points, screeningPoint{configHash: space.CanonicalHash(a), assignments: a})
+	}
+
+	for _, p := range points {
+		if err := r.ensureTrial(ctx, study, p); err != nil {
+			return 0, err
+		}
+	}
+	return len(points), nil
+}
+
+// expandSweep produces the config assignments for the sweep using the study's strategy.
+// grid and random are evaluated in-controller (compiled in for --local zero-dep runs,
+// §5.1); other strategies fall back to a grid until the strategy-plugin ask/tell loop
+// lands (TODO(m1)).
+func (r *StudyReconciler) expandSweep(study *v1alpha1.Study) ([]map[string]string, error) {
+	if len(study.Spec.Space.Dimensions) == 0 {
+		return nil, nil
+	}
+	sp, err := space.Resolve(study.Spec.Space)
+	if err != nil {
+		return nil, fmt.Errorf("resolve search space: %w", err)
+	}
+	strat := strings.ToLower(study.Spec.Space.Strategy.Plugin)
+	cfg := parseStrategyConfig(study.Spec.Space.Strategy.Config)
+	if strings.Contains(strat, "random") {
+		n := cfg.Points
+		if n <= 0 {
+			n = 20
+		}
+		seed := cfg.Seed
+		if seed == 0 {
+			seed = seedFromUID(string(study.UID))
+		}
+		return randomPoints(sp, n, seed)
+	}
+	// grid (default), sobol, asha — grid expansion until plugin-driven search lands.
+	return space.GridPoints(sp)
+}
+
+// randomPoints draws up to n unique random assignments from the space.
+func randomPoints(sp *space.Space, n int, seed int64) ([]map[string]string, error) {
+	seen := map[string]bool{}
+	out := make([]map[string]string, 0, n)
+	for i := 0; i < n*8 && len(out) < n; i++ {
+		p, err := space.RandomPoint(sp, seed+int64(i))
+		if err != nil {
+			return nil, err
+		}
+		h := space.CanonicalHash(p)
+		if seen[h] {
+			continue
+		}
+		seen[h] = true
+		out = append(out, p)
+	}
+	return out, nil
+}
+
+func parseStrategyConfig(raw *runtime.RawExtension) strategyConfig {
+	var c strategyConfig
+	if raw != nil && len(raw.Raw) > 0 {
+		_ = json.Unmarshal(raw.Raw, &c)
+	}
+	return c
+}
+
+// ensureTrial creates one screening Trial CR owned by the study, if it does not
+// already exist. Deterministic naming (by config hash) keeps it idempotent.
+func (r *StudyReconciler) ensureTrial(ctx context.Context, study *v1alpha1.Study, p screeningPoint) error {
 	var workloadName string
 	var fidelity v1alpha1.FidelitySpec
 	if len(study.Spec.Workloads) > 0 {
@@ -157,7 +253,11 @@ func (r *StudyReconciler) ensureScreeningTrial(ctx context.Context, study *v1alp
 		fidelity = v1alpha1.FidelitySpec{Warmup: w.Warmup, Measure: w.Measure}
 	}
 
-	trialName := fmt.Sprintf("%s-screen-%s", study.Name, configHash[:8])
+	suffix := p.configHash
+	if len(suffix) > 8 {
+		suffix = suffix[:8]
+	}
+	trialName := fmt.Sprintf("%s-screen-%s", study.Name, suffix)
 
 	var existing v1alpha1.Trial
 	err := r.Get(ctx, client.ObjectKey{Namespace: study.Namespace, Name: trialName}, &existing)
@@ -168,25 +268,35 @@ func (r *StudyReconciler) ensureScreeningTrial(ctx context.Context, study *v1alp
 		return fmt.Errorf("get screening trial %q: %w", trialName, err)
 	}
 
+	labels := map[string]string{
+		"parallax.dev/study": study.Name,
+		"parallax.dev/mode":  string(v1alpha1.TrialModeScreening),
+	}
+	if p.isBaseline {
+		labels["parallax.dev/baseline"] = "true"
+	}
 	trial := &v1alpha1.Trial{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      trialName,
 			Namespace: study.Namespace,
-			Labels: map[string]string{
-				"parallax.dev/study": study.Name,
-				"parallax.dev/mode":  string(v1alpha1.TrialModeScreening),
-			},
+			Labels:    labels,
 		},
 		Spec: v1alpha1.TrialSpec{
 			StudyRef:   v1alpha1.LocalRef{Name: study.Name},
-			ConfigHash: configHash,
+			ConfigHash: p.configHash,
+			Dimensions: p.assignments,
 			Workload:   workloadName,
 			Fidelity:   fidelity,
 			Mode:       v1alpha1.TrialModeScreening,
 		},
 	}
-	if study.Spec.Baseline.Values != nil {
+	switch {
+	case p.isBaseline && study.Spec.Baseline.Values != nil:
 		trial.Spec.Config = study.Spec.Baseline.Values.DeepCopy()
+	case len(p.assignments) > 0:
+		if raw, err := json.Marshal(p.assignments); err == nil {
+			trial.Spec.Config = &runtime.RawExtension{Raw: raw}
+		}
 	}
 	if err := controllerutil.SetControllerReference(study, trial, r.Scheme); err != nil {
 		return fmt.Errorf("set owner ref on trial %q: %w", trialName, err)
