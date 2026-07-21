@@ -346,6 +346,24 @@ func (d *DB) RecordPluginAudit(ctx context.Context, a *store.PluginAuditRecord) 
 	return nil
 }
 
+// GetStudy fetches a study record by id (used by offline `parallax select`).
+func (d *DB) GetStudy(ctx context.Context, studyID int64) (*store.StudyRecord, error) {
+	const q = `SELECT id, name, namespace, spec, spec_hash, created_at FROM studies WHERE id = $1`
+	var (
+		s    store.StudyRecord
+		spec []byte
+	)
+	err := d.pool.QueryRow(ctx, q, studyID).Scan(&s.ID, &s.Name, &s.Namespace, &spec, &s.SpecHash, &s.CreatedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("postgres: study %d not found: %w", studyID, err)
+		}
+		return nil, fmt.Errorf("postgres: get study %d: %w", studyID, err)
+	}
+	s.Spec = rawOrNil(spec)
+	return &s, nil
+}
+
 // GetRun loads a single run by id.
 func (d *DB) GetRun(ctx context.Context, runID int64) (*store.RunRecord, error) {
 	const q = `SELECT id, study_id, seed, fingerprint, phase, started_at, completed_at FROM runs WHERE id = $1`

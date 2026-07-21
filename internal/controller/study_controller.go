@@ -34,6 +34,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	v1alpha1 "github.com/aburan28/parallax/api/v1alpha1"
+	"github.com/aburan28/parallax/internal/space"
 	"github.com/aburan28/parallax/internal/store"
 )
 
@@ -144,15 +145,9 @@ func (r *StudyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 // ensureScreeningTrial creates the baseline screening Trial CR owned by the study, if it
 // does not already exist. Deterministic naming keeps it idempotent across reconciles.
 func (r *StudyReconciler) ensureScreeningTrial(ctx context.Context, study *v1alpha1.Study) error {
-	// Config hash of the baseline point: the baseline values (or its name) fingerprint.
-	var baselineRaw []byte
-	if study.Spec.Baseline.Values != nil {
-		baselineRaw = study.Spec.Baseline.Values.Raw
-	}
-	if len(baselineRaw) == 0 {
-		baselineRaw = []byte(study.Spec.Baseline.Name)
-	}
-	configHash := shortHash(append([]byte("baseline:"), baselineRaw...))
+	// Config hash of the baseline point; shared with `parallax select` so the CLI can
+	// identify the baseline row it recomputes (see space.BaselineHash).
+	configHash := space.BaselineHash(study.Spec)
 
 	var workloadName string
 	var fidelity v1alpha1.FidelitySpec

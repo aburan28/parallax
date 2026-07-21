@@ -40,6 +40,7 @@ func newRootCmd() *cobra.Command {
 		newVersionCmd(),
 		newApplyCmd(),
 		newStatusCmd(),
+		newSelectCmd(),
 		newReportCmd(),
 		newPromoteCmd(),
 		newDatasetsCmd(),
