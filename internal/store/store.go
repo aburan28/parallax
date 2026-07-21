@@ -59,6 +59,7 @@ type Store interface {
 	RecordPluginAudit(ctx context.Context, a *PluginAuditRecord) error
 
 	// Read paths for `parallax select` / `parallax report` (offline replay).
+	GetStudy(ctx context.Context, studyID int64) (*StudyRecord, error)
 	GetRun(ctx context.Context, runID int64) (*RunRecord, error)
 	ListTrialsForRun(ctx context.Context, runID int64) ([]TrialRecord, error)
 	ListSLIValuesForRun(ctx context.Context, runID int64) ([]SLIValueRecord, error)

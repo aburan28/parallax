@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -45,6 +46,14 @@ const pluginCallTimeout = 30 * time.Second
 // per reconcile so each phase boundary is observable and idempotent.
 const trialRequeue = 2 * time.Second
 
+// healthGateTimeout bounds how long the HealthGate phase waits for target.Ready to
+// report ready before the trial is failed (DESIGN.md §9).
+const healthGateTimeout = 5 * time.Minute
+
+// loadRunRefAnnotation stores the load driver's run handle between Start and Stop so
+// the reconcile that stops the load can reference the run the earlier reconcile began.
+const loadRunRefAnnotation = "parallax.dev/load-run-ref"
+
 // TrialReconciler executes one Trial CR through the state machine (DESIGN.md §9),
 // calling plugins at the right boundaries and persisting evidence to the results DB.
 type TrialReconciler struct {
@@ -52,6 +61,17 @@ type TrialReconciler struct {
 	Scheme   *runtime.Scheme
 	Recorder record.EventRecorder
 	Deps
+	// Plugins is the plugin call surface; when nil it is built from Deps.Host.
+	// Tests inject a fake.
+	Plugins trialPlugins
+}
+
+// plugins returns the plugin call surface, defaulting to a host-backed adapter.
+func (r *TrialReconciler) plugins() trialPlugins {
+	if r.Plugins != nil {
+		return r.Plugins
+	}
+	return hostPlugins{host: r.Host}
 }
 
 // resolvedPlugins holds the plugin names a trial calls, resolved from its parent Study.
@@ -96,41 +116,83 @@ func (r *TrialReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 
 	now := func() *metav1.Time { t := metav1.Now(); return &t }
 
+	// One bounded context for whatever plugin call this reconcile makes (§5.5).
+	cctx, cancel := context.WithTimeout(ctx, pluginCallTimeout)
+	defer cancel()
+
 	switch trial.Status.Phase {
 	case v1alpha1.TrialPhasePending:
 		r.Recorder.Event(&trial, corev1.EventTypeNormal, "Started", "trial state machine started")
 		trial.Status.Phase = v1alpha1.TrialPhaseConfiguring
 
 	case v1alpha1.TrialPhaseConfiguring:
-		// target.Apply materializes the config point (helm upgrade / CR patch).
-		if err := r.applyTarget(ctx, pl.target, &trial); err != nil {
-			r.pluginSkipped(ctx, &trial, "TargetApply", pl.target, err)
+		// target.Apply materializes the config point (helm upgrade / CR patch). A
+		// reachable target that reports failure fails the trial; an unreachable plugin
+		// (no host wired) is tolerated so --local runs without plugins still progress.
+		if pl.target != "" {
+			resp, err := r.plugins().Apply(cctx, pl.target, &pluginv1.ApplyRequest{
+				ConfigHash:    trial.Spec.ConfigHash,
+				Dimensions:    trial.Spec.Dimensions,
+				RawConfigJson: rawConfig(&trial),
+			})
+			if err != nil {
+				r.pluginSkipped(ctx, &trial, "TargetApply", pl.target, err)
+			} else if !resp.GetApplied() {
+				return r.failTrial(ctx, &trial, v1alpha1.TrialPhaseFailed, "TargetApplyFailed", resp.GetDetail())
+			}
 		}
 		trial.Status.Timeline.Applied = now()
 		trial.Status.Phase = v1alpha1.TrialPhaseHealthGate
 
 	case v1alpha1.TrialPhaseHealthGate:
-		// target.Ready gates on rollout + health before load starts.
-		if err := r.readyTarget(ctx, pl.target, &trial); err != nil {
-			r.pluginSkipped(ctx, &trial, "TargetReady", pl.target, err)
+		// target.Ready gates on rollout + health before load starts. A not-ready gate
+		// requeues until the health-gate deadline, then fails (§9).
+		if pl.target != "" {
+			resp, err := r.plugins().Ready(cctx, pl.target, &pluginv1.ReadyRequest{
+				ConfigHash:     trial.Spec.ConfigHash,
+				TimeoutSeconds: int64(healthGateTimeout / time.Second),
+			})
+			switch {
+			case err != nil:
+				r.pluginSkipped(ctx, &trial, "TargetReady", pl.target, err)
+			case !resp.GetReady():
+				if since(trial.Status.Timeline.Applied) > healthGateTimeout {
+					return r.failTrial(ctx, &trial, v1alpha1.TrialPhaseFailed, "HealthGateTimeout", resp.GetDetail())
+				}
+				return ctrl.Result{RequeueAfter: trialRequeue}, r.Status().Update(ctx, &trial) // stay in HealthGate
+			}
 		}
 		trial.Status.Timeline.Ready = now()
 		trial.Status.Phase = v1alpha1.TrialPhaseWarmup
 
 	case v1alpha1.TrialPhaseWarmup:
-		// loaddriver.Start begins replay; warmup is not measured.
-		if err := r.startLoad(ctx, pl.loadDriver, &trial); err != nil {
-			r.pluginSkipped(ctx, &trial, "LoadStart", pl.loadDriver, err)
+		// loaddriver.Start begins replay; warmup is not measured. The run is keyed by
+		// trial UID so a later reconcile can Stop it without cross-reconcile state.
+		if pl.loadDriver != "" {
+			if _, err := r.plugins().StartLoad(cctx, pl.loadDriver, &pluginv1.StartRequest{
+				TrialId:      string(trial.UID),
+				WorkloadJson: workloadJSON(study, &trial),
+			}); err != nil {
+				r.pluginSkipped(ctx, &trial, "LoadStart", pl.loadDriver, err)
+			}
 		}
 		// t1 is stamped as measurement begins (after warmup) — §9 "timestamps are law".
 		trial.Status.Timeline.T1 = now()
 		trial.Status.Phase = v1alpha1.TrialPhaseMeasuring
 
 	case v1alpha1.TrialPhaseMeasuring:
-		// Measurement window closes: stamp t2 and stop the load driver.
+		// Measurement window closes: stamp t2 and stop the load driver. An abort reported
+		// by the driver terminates the trial as Aborted (recorded, §9).
 		trial.Status.Timeline.T2 = now()
-		if err := r.stopLoad(ctx, pl.loadDriver, &trial); err != nil {
-			r.pluginSkipped(ctx, &trial, "LoadStop", pl.loadDriver, err)
+		if pl.loadDriver != "" {
+			resp, err := r.plugins().StopLoad(cctx, pl.loadDriver, &pluginv1.StopRequest{
+				RunRef: string(trial.UID),
+			})
+			if err != nil {
+				r.pluginSkipped(ctx, &trial, "LoadStop", pl.loadDriver, err)
+			} else if resp != nil && !resp.GetOk() {
+				return r.failTrial(ctx, &trial, v1alpha1.TrialPhaseAborted, "LoadAborted", "load driver reported an aborted run")
+			}
 		}
 		trial.Status.Phase = v1alpha1.TrialPhaseDraining
 
@@ -211,111 +273,48 @@ func (r *TrialReconciler) resolvePlugins(ctx context.Context, trial *v1alpha1.Tr
 // pluginSkipped records that a plugin call could not be made (typically because the
 // plugin is not wired/Ready in an M0 environment) without failing the trial.
 func (r *TrialReconciler) pluginSkipped(ctx context.Context, trial *v1alpha1.Trial, reason, name string, err error) {
-	logf.FromContext(ctx).Info("plugin call skipped (M0: plugin may be unwired)", "reason", reason, "plugin", name, "err", err)
+	logf.FromContext(ctx).Info("plugin call skipped (plugin may be unwired)", "reason", reason, "plugin", name, "err", err)
 	r.Recorder.Eventf(trial, corev1.EventTypeWarning, reason, "plugin %q unavailable: %v", name, err)
 }
 
-// applyTarget calls target.Apply for the trial's config point.
-func (r *TrialReconciler) applyTarget(ctx context.Context, name string, trial *v1alpha1.Trial) error {
-	if name == "" {
-		return fmt.Errorf("no target plugin resolved")
-	}
-	conn, err := r.Host.Conn(name)
-	if err != nil {
-		return fmt.Errorf("target plugin %q: %w", name, err)
-	}
-	cctx, cancel := context.WithTimeout(ctx, pluginCallTimeout)
-	defer cancel()
-	tc := pluginv1.NewTargetClient(conn)
-	req := &pluginv1.ApplyRequest{
-		ConfigHash: trial.Spec.ConfigHash,
-		Dimensions: trial.Spec.Dimensions,
-	}
-	if trial.Spec.Config != nil {
-		req.RawConfigJson = trial.Spec.Config.Raw
-	}
-	// TODO(m1): inspect ApplyResponse; on failure transition Trial -> Failed with reason.
-	_, err = tc.Apply(cctx, req)
-	return err
-}
-
-// readyTarget calls target.Ready to gate on rollout + health.
-func (r *TrialReconciler) readyTarget(ctx context.Context, name string, trial *v1alpha1.Trial) error {
-	if name == "" {
-		return fmt.Errorf("no target plugin resolved")
-	}
-	conn, err := r.Host.Conn(name)
-	if err != nil {
-		return fmt.Errorf("target plugin %q: %w", name, err)
-	}
-	cctx, cancel := context.WithTimeout(ctx, pluginCallTimeout)
-	defer cancel()
-	tc := pluginv1.NewTargetClient(conn)
-	// TODO(m1): honour ReadyResponse.ready; on gate timeout transition -> Failed.
-	_, err = tc.Ready(cctx, &pluginv1.ReadyRequest{
-		ConfigHash:     trial.Spec.ConfigHash,
-		TimeoutSeconds: int64(pluginCallTimeout / time.Second),
+// failTrial transitions a trial to a terminal non-success phase (Failed/Aborted),
+// records the reason, and persists status. It returns a no-requeue result.
+func (r *TrialReconciler) failTrial(ctx context.Context, trial *v1alpha1.Trial, phase v1alpha1.TrialPhase, reason, detail string) (ctrl.Result, error) {
+	trial.Status.Phase = phase
+	apimeta.SetStatusCondition(&trial.Status.Conditions, metav1.Condition{
+		Type:               condReady,
+		Status:             metav1.ConditionFalse,
+		ObservedGeneration: trial.Generation,
+		Reason:             reason,
+		Message:            detail,
 	})
-	return err
+	r.Recorder.Eventf(trial, corev1.EventTypeWarning, reason, "trial %s: %s", phase, detail)
+	if err := r.Status().Update(ctx, trial); err != nil {
+		return ctrl.Result{}, fmt.Errorf("update failed-trial status: %w", err)
+	}
+	return ctrl.Result{}, nil
 }
 
-// startLoad calls loaddriver.Start to begin replay for this trial.
-func (r *TrialReconciler) startLoad(ctx context.Context, name string, trial *v1alpha1.Trial) error {
-	if name == "" {
-		return fmt.Errorf("no load driver plugin resolved")
-	}
-	conn, err := r.Host.Conn(name)
-	if err != nil {
-		return fmt.Errorf("load driver plugin %q: %w", name, err)
-	}
-	cctx, cancel := context.WithTimeout(ctx, pluginCallTimeout)
-	defer cancel()
-	lc := pluginv1.NewLoadDriverClient(conn)
-	// TODO(m1): build the workload JSON from the resolved Workload/Dataset and Watch the
-	// stream for abort-policy state instead of fire-and-forget.
-	_, err = lc.Start(cctx, &pluginv1.StartRequest{TrialId: string(trial.UID)})
-	return err
-}
-
-// stopLoad calls loaddriver.Stop to end replay when the measurement window closes.
-func (r *TrialReconciler) stopLoad(ctx context.Context, name string, trial *v1alpha1.Trial) error {
-	if name == "" {
-		return fmt.Errorf("no load driver plugin resolved")
-	}
-	conn, err := r.Host.Conn(name)
-	if err != nil {
-		return fmt.Errorf("load driver plugin %q: %w", name, err)
-	}
-	cctx, cancel := context.WithTimeout(ctx, pluginCallTimeout)
-	defer cancel()
-	lc := pluginv1.NewLoadDriverClient(conn)
-	// TODO(m1): pass the real run ref returned by Start.
-	_, err = lc.Stop(cctx, &pluginv1.StopRequest{RunRef: string(trial.UID)})
-	return err
-}
-
-// collectAndPersist evaluates SLIs via provider plugins and writes the TrialRecord plus
-// SLI values to the results DB.
+// collectAndPersist evaluates SLIs via provider plugins over the recorded window and
+// writes the TrialRecord plus SLI values to the results DB (DESIGN.md §11, §15).
 func (r *TrialReconciler) collectAndPersist(ctx context.Context, pl resolvedPlugins, study *v1alpha1.Study, trial *v1alpha1.Trial) error {
 	log := logf.FromContext(ctx)
 
-	// Best-effort provider.Collect for each distinct provider. TODO(m1): build the
-	// Window from [t1, t2] and the per-SLI queries, then parse CollectResponse into
-	// concrete SLIValueRecords instead of the placeholders below.
-	for _, name := range pl.providers {
-		if err := r.collectProvider(ctx, name); err != nil {
-			r.pluginSkipped(ctx, trial, "ProviderCollect", name, err)
-		}
+	collected := map[string]collectedSLI{}
+	if study != nil {
+		collected = r.collectSLIs(ctx, study, trial)
 	}
 
-	// Placeholder SLI results mirrored from the study spec (real values land in m1).
+	// Status summary carries the collected value per SLI (0 where a provider was
+	// unreachable, so the trial still completes rather than wedging).
 	var sliResults []v1alpha1.SLIResult
 	if study != nil {
 		for _, sli := range study.Spec.SLIs {
+			c := collected[sli.Name]
 			sliResults = append(sliResults, v1alpha1.SLIResult{
 				Name:  sli.Name,
 				Class: sli.Class,
-				Value: "0", // TODO(m1): real collected value.
+				Value: strconv.FormatFloat(c.value, 'g', -1, 64),
 			})
 		}
 	}
@@ -351,15 +350,16 @@ func (r *TrialReconciler) collectAndPersist(ctx context.Context, pl resolvedPlug
 		return fmt.Errorf("upsert trial record: %w", err)
 	}
 
-	if len(sliResults) > 0 {
-		values := make([]store.SLIValueRecord, 0, len(sliResults))
+	if study != nil && len(study.Spec.SLIs) > 0 {
+		values := make([]store.SLIValueRecord, 0, len(study.Spec.SLIs))
 		for _, sli := range study.Spec.SLIs {
+			c := collected[sli.Name]
 			values = append(values, store.SLIValueRecord{
 				TrialID:     trialID,
 				Name:        sli.Name,
 				Provider:    sli.Provider,
 				Class:       sli.Class,
-				Value:       0, // TODO(m1): real collected value.
+				Value:       c.value,
 				Query:       sli.Query,
 				EvaluatedAt: time.Now().UTC(),
 			})
@@ -376,18 +376,92 @@ func (r *TrialReconciler) collectAndPersist(ctx context.Context, pl resolvedPlug
 	return nil
 }
 
-// collectProvider makes a single best-effort provider.Collect call.
-func (r *TrialReconciler) collectProvider(ctx context.Context, name string) error {
-	conn, err := r.Host.Conn(name)
-	if err != nil {
-		return fmt.Errorf("provider plugin %q: %w", name, err)
+// collectedSLI is one provider-returned SLI value plus whether the provider answered.
+type collectedSLI struct {
+	value float64
+	ok    bool
+}
+
+// collectSLIs groups the study's provider-backed SLIs by provider, calls each
+// provider's Collect over the trial's measurement window, and returns the values by
+// SLI name. The derived class is computed in-core, not via a provider (§5.1); derived
+// evaluation is TODO(m1), so those SLIs are collected as zero for now.
+func (r *TrialReconciler) collectSLIs(ctx context.Context, study *v1alpha1.Study, trial *v1alpha1.Trial) map[string]collectedSLI {
+	out := map[string]collectedSLI{}
+	window := &pluginv1.Window{
+		T1Rfc3339: timeRFC3339(trial.Status.Timeline.T1),
+		T2Rfc3339: timeRFC3339(trial.Status.Timeline.T2),
 	}
-	cctx, cancel := context.WithTimeout(ctx, pluginCallTimeout)
-	defer cancel()
-	pc := pluginv1.NewProviderClient(conn)
-	// TODO(m1): pass Window{t1,t2} + SLIQuery list and parse the response.
-	_, err = pc.Collect(cctx, &pluginv1.CollectRequest{})
-	return err
+
+	// provider name -> the SLIQuery list to ask it for.
+	byProvider := map[string][]*pluginv1.SLIQuery{}
+	for _, sli := range study.Spec.SLIs {
+		if sli.Provider == "" || sli.Class == "derived" {
+			continue // derived SLIs are in-core (TODO(m1)); unprovidered SLIs skipped
+		}
+		byProvider[sli.Provider] = append(byProvider[sli.Provider], &pluginv1.SLIQuery{
+			Name:     sli.Name,
+			SliClass: sli.Class,
+			Query:    sli.Query,
+			Expr:     sli.Expr,
+		})
+	}
+
+	for provider, queries := range byProvider {
+		cctx, cancel := context.WithTimeout(ctx, pluginCallTimeout)
+		resp, err := r.plugins().Collect(cctx, provider, &pluginv1.CollectRequest{
+			Window:  window,
+			Queries: queries,
+		})
+		cancel()
+		if err != nil {
+			r.pluginSkipped(ctx, trial, "ProviderCollect", provider, err)
+			continue
+		}
+		for _, v := range resp.GetValues() {
+			out[v.GetName()] = collectedSLI{value: v.GetValue(), ok: v.GetOk()}
+		}
+	}
+	return out
+}
+
+// rawConfig returns the trial's config JSON, or nil.
+func rawConfig(trial *v1alpha1.Trial) []byte {
+	if trial.Spec.Config != nil {
+		return trial.Spec.Config.Raw
+	}
+	return nil
+}
+
+// workloadJSON serializes the resolved workload block the load driver replays.
+func workloadJSON(study *v1alpha1.Study, trial *v1alpha1.Trial) []byte {
+	if study == nil {
+		return nil
+	}
+	for i := range study.Spec.Workloads {
+		if study.Spec.Workloads[i].Name == trial.Spec.Workload {
+			if b, err := json.Marshal(study.Spec.Workloads[i]); err == nil {
+				return b
+			}
+		}
+	}
+	return nil
+}
+
+// timeRFC3339 renders a metav1.Time as RFC3339, or "" if nil.
+func timeRFC3339(t *metav1.Time) string {
+	if t == nil {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339)
+}
+
+// since returns how long ago t was, or 0 if t is nil.
+func since(t *metav1.Time) time.Duration {
+	if t == nil {
+		return 0
+	}
+	return time.Since(t.Time)
 }
 
 // runIDFromStudy returns the results-DB run id string from the study status, or "".

@@ -181,6 +181,22 @@ func CanonicalHash(assignments map[string]string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// BaselineHash returns the deterministic config hash of a study's baseline point.
+// The Study controller stamps this exact value on the baseline screening trial, and
+// `parallax select` recomputes it to identify the baseline row — so both must use
+// this one definition.
+func BaselineHash(spec v1alpha1.StudySpec) string {
+	var raw []byte
+	if spec.Baseline.Values != nil {
+		raw = spec.Baseline.Values.Raw
+	}
+	if len(raw) == 0 {
+		raw = []byte(spec.Baseline.Name)
+	}
+	sum := sha256.Sum256(append([]byte("baseline:"), raw...))
+	return hex.EncodeToString(sum[:])[:16]
+}
+
 // Satisfies reports whether an assignment passes the space's CEL constraints.
 //
 // TODO(m1): compile and evaluate the CEL Constraints (google/cel-go is already
