@@ -20,7 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
+	"sort"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -39,6 +39,10 @@ import (
 	"github.com/aburan28/parallax/internal/store"
 )
 
+// studyLabel keys a Trial to its parent Study; the sweep lists by it to learn what
+// has already been materialized and what is still in flight.
+const studyLabel = "parallax.dev/study"
+
 // StudyReconciler owns the funnel (DESIGN.md §4.1, §7): it registers the study+run in
 // the results DB, materializes Trial CRs, and advances the study through its phases.
 type StudyReconciler struct {
@@ -46,6 +50,9 @@ type StudyReconciler struct {
 	Scheme   *runtime.Scheme
 	Recorder record.EventRecorder
 	Deps
+	// Strategy is the strategy-plugin call surface; when nil it is built from
+	// Deps.Host. Tests inject a fake.
+	Strategy strategyAsker
 }
 
 // +kubebuilder:rbac:groups=parallax.dev,resources=studies,verbs=get;list;watch;create;update;patch;delete
@@ -110,13 +117,16 @@ func (r *StudyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 		r.Recorder.Eventf(&study, corev1.EventTypeNormal, "RunCreated", "results-DB run %d created", runID)
 	}
 
-	// 3. Materialize screening Trial CRs: the baseline point plus the strategy's
-	//    expansion of the search space, capped by the trial budget (§7, §8).
-	total, err := r.materializeSweep(ctx, &study)
+	// 3. Materialize screening Trial CRs: the baseline point plus the strategy's next
+	//    batch, capped by the trial budget (§7, §8). A strategy that cannot be
+	//    resolved fails the study — a sweep that silently searched a different space
+	//    than the one it declared is worse than no sweep.
+	sweep, err := r.materializeSweep(ctx, &study)
 	if err != nil {
-		return ctrl.Result{}, err
+		return r.failStudy(ctx, &study, "SweepFailed", err.Error())
 	}
-	study.Status.TrialsTotal = int32(total)
+	study.Status.TrialsTotal = int32(sweep.total)
+	study.Status.TrialsCompleted = int32(sweep.completed)
 
 	// 4. Advance Pending -> Sweeping once the run and first trial exist.
 	if study.Status.Phase == v1alpha1.StudyPhasePending {
@@ -129,18 +139,55 @@ func (r *StudyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 		r.Recorder.Event(&study, corev1.EventTypeNormal, "Sweeping", "screening sweep started")
 	}
 
-	apimeta.SetStatusCondition(&study.Status.Conditions, metav1.Condition{
-		Type:               condProgressing,
-		Status:             metav1.ConditionTrue,
-		ObservedGeneration: study.Generation,
-		Reason:             "Sweeping",
-		Message:            "screening sweep in progress",
-	})
+	// The sweep is complete when the strategy says it is done and every trial has
+	// reached a terminal phase. Selection is driven offline by `parallax select`
+	// until the in-controller funnel lands (TODO(m1)), so the study stays in
+	// Sweeping — but the condition makes completion observable.
+	switch {
+	case sweep.done && sweep.completed >= sweep.total:
+		apimeta.SetStatusCondition(&study.Status.Conditions, metav1.Condition{
+			Type:               condProgressing,
+			Status:             metav1.ConditionFalse,
+			ObservedGeneration: study.Generation,
+			Reason:             "SweepComplete",
+			Message: fmt.Sprintf("screening sweep complete: %d/%d trials collected",
+				sweep.completed, sweep.total),
+		})
+	default:
+		apimeta.SetStatusCondition(&study.Status.Conditions, metav1.Condition{
+			Type:               condProgressing,
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: study.Generation,
+			Reason:             "Sweeping",
+			Message: fmt.Sprintf("screening sweep in progress: %d/%d trials collected",
+				sweep.completed, sweep.total),
+		})
+	}
 
 	if err := r.Status().Update(ctx, &study); err != nil {
 		return ctrl.Result{}, fmt.Errorf("update study status: %w", err)
 	}
-	log.Info("reconciled study", "phase", study.Status.Phase, "run", study.Status.RunID)
+	log.Info("reconciled study", "phase", study.Status.Phase, "run", study.Status.RunID,
+		"trials", sweep.total, "completed", sweep.completed, "sweepDone", sweep.done)
+	return ctrl.Result{}, nil
+}
+
+// failStudy drives the study to a terminal Failed phase with a recorded reason. Used
+// for configuration errors the study cannot recover from on its own — chiefly an
+// unresolvable search strategy.
+func (r *StudyReconciler) failStudy(ctx context.Context, study *v1alpha1.Study, reason, detail string) (ctrl.Result, error) {
+	study.Status.Phase = v1alpha1.StudyPhaseFailed
+	apimeta.SetStatusCondition(&study.Status.Conditions, metav1.Condition{
+		Type:               condProgressing,
+		Status:             metav1.ConditionFalse,
+		ObservedGeneration: study.Generation,
+		Reason:             reason,
+		Message:            detail,
+	})
+	r.Recorder.Eventf(study, corev1.EventTypeWarning, reason, "%s", detail)
+	if err := r.Status().Update(ctx, study); err != nil {
+		return ctrl.Result{}, fmt.Errorf("update failed-study status: %w", err)
+	}
 	return ctrl.Result{}, nil
 }
 
@@ -151,101 +198,163 @@ type screeningPoint struct {
 	isBaseline  bool
 }
 
-// strategyConfig is the small config block carried by grid/random strategies.
-type strategyConfig struct {
-	Points int   `json:"points"`
-	Seed   int64 `json:"seed"`
+// sweepState is what one materializeSweep pass observed and did.
+type sweepState struct {
+	// total is every screening trial that exists for the study.
+	total int
+	// completed is how many of them have reached a terminal phase.
+	completed int
+	// done reports that the strategy has nothing further to suggest.
+	done bool
 }
 
-// materializeSweep creates the baseline screening trial plus the strategy's expansion
-// of the search space, capped by the trial budget, and returns the total count. It is
-// idempotent: trials are deterministically named by config hash, so re-reconciles skip
-// existing ones (DESIGN.md §7, §8).
-func (r *StudyReconciler) materializeSweep(ctx context.Context, study *v1alpha1.Study) (int, error) {
+// materializeSweep advances the screening sweep by one batch.
+//
+// It is a loop, not a one-shot expansion: the strategy is asked for the next points
+// only when there is room in flight, so an adaptive strategy sees the previous
+// batch's results before choosing the next. That is what makes the strategy seam real
+// — a Bayesian or ASHA plugin needs feedback, and the old whole-space expansion could
+// never give it any (docs/GENERALIZATION.md G3).
+//
+// Idempotent: trials are deterministically named by config hash and workload, so
+// re-reconciles skip what already exists (DESIGN.md §7, §8).
+func (r *StudyReconciler) materializeSweep(ctx context.Context, study *v1alpha1.Study) (sweepState, error) {
+	log := logf.FromContext(ctx)
+
+	var existing v1alpha1.TrialList
+	if err := r.List(ctx, &existing,
+		client.InNamespace(study.Namespace),
+		client.MatchingLabels{studyLabel: study.Name},
+	); err != nil {
+		return sweepState{}, fmt.Errorf("list trials for study %q: %w", study.Name, err)
+	}
+
+	state := sweepState{total: len(existing.Items)}
+	seen := map[string]bool{}
+	pending := map[string]bool{}
+	inFlight := 0
+	for i := range existing.Items {
+		t := &existing.Items[i]
+		seen[t.Spec.ConfigHash] = true
+		if terminalTrialPhase(t.Status.Phase) {
+			state.completed++
+		} else {
+			inFlight++
+			pending[t.Spec.ConfigHash] = true
+		}
+	}
+
 	// The baseline point always screens; its hash matches space.BaselineHash so
 	// `parallax select` can identify the baseline row (§7, §12).
-	points := []screeningPoint{{configHash: space.BaselineHash(study.Spec), isBaseline: true}}
-
-	expanded, err := r.expandSweep(study)
-	if err != nil {
-		return 0, err
-	}
-	maxTrials := int(study.Spec.Budgets.MaxTrials)
-	for _, a := range expanded {
-		if maxTrials > 0 && len(points) >= maxTrials {
-			break // trial budget reached (§8 budgets)
-		}
-		points = append(points, screeningPoint{configHash: space.CanonicalHash(a), assignments: a})
-	}
-
-	// Every config point screens against every workload: a config that wins under one
-	// load shape and loses under another is exactly what the study exists to surface.
-	// A study with no workloads still materializes its points (unit/dry-run paths).
-	total := 0
-	for _, p := range points {
-		if len(study.Spec.Workloads) == 0 {
-			if err := r.ensureTrial(ctx, study, p, -1); err != nil {
-				return 0, err
-			}
-			total++
-			continue
-		}
-		for i := range study.Spec.Workloads {
-			if err := r.ensureTrial(ctx, study, p, i); err != nil {
-				return 0, err
-			}
-			total++
-		}
-	}
-	return total, nil
-}
-
-// expandSweep produces the config assignments for the sweep using the study's strategy.
-// grid and random are evaluated in-controller (compiled in for --local zero-dep runs,
-// §5.1); other strategies fall back to a grid until the strategy-plugin ask/tell loop
-// lands (TODO(m1)).
-func (r *StudyReconciler) expandSweep(study *v1alpha1.Study) ([]map[string]string, error) {
-	if len(study.Spec.Space.Dimensions) == 0 {
-		return nil, nil
-	}
-	sp, err := space.Resolve(study.Spec.Space)
-	if err != nil {
-		return nil, fmt.Errorf("resolve search space: %w", err)
-	}
-	strat := strings.ToLower(study.Spec.Space.Strategy.Plugin)
-	cfg := parseStrategyConfig(study.Spec.Space.Strategy.Config)
-	if strings.Contains(strat, "random") {
-		n := cfg.Points
-		if n <= 0 {
-			n = 20
-		}
-		seed := cfg.Seed
-		if seed == 0 {
-			seed = seedFromUID(string(study.UID))
-		}
-		return randomPoints(sp, n, seed)
-	}
-	// grid (default), sobol, asha — grid expansion until plugin-driven search lands.
-	return space.GridPoints(sp)
-}
-
-// randomPoints draws up to n unique random assignments from the space.
-func randomPoints(sp *space.Space, n int, seed int64) ([]map[string]string, error) {
-	seen := map[string]bool{}
-	out := make([]map[string]string, 0, n)
-	for i := 0; i < n*8 && len(out) < n; i++ {
-		p, err := space.RandomPoint(sp, seed+int64(i))
+	baseline := space.BaselineHash(study.Spec)
+	if !seen[baseline] {
+		n, err := r.ensureTrials(ctx, study, screeningPoint{configHash: baseline, isBaseline: true})
 		if err != nil {
-			return nil, err
+			return state, err
 		}
-		h := space.CanonicalHash(p)
+		seen[baseline] = true
+		pending[baseline] = true
+		inFlight += n
+		state.total += n
+	}
+
+	// Budget is counted in distinct config points: reps and workloads of one point are
+	// the same experiment (§8 budgets).
+	maxPoints := int(study.Spec.Budgets.MaxTrials)
+	if maxPoints > 0 && len(seen) >= maxPoints {
+		log.V(1).Info("sweep budget reached", "points", len(seen), "maxTrials", maxPoints)
+		state.done = true
+		return state, nil
+	}
+	if len(study.Spec.Space.Dimensions) == 0 {
+		state.done = true // baseline-only study
+		return state, nil
+	}
+
+	cfg := parseStrategyConfig(study.Spec.Space.Strategy.Config)
+	batch := cfg.BatchSize
+	if batch <= 0 {
+		batch = defaultAskBatch
+	}
+	if inFlight >= batch {
+		return state, nil // enough in flight; wait for results before asking again
+	}
+	want := batch - inFlight
+	if maxPoints > 0 && len(seen)+want > maxPoints {
+		want = maxPoints - len(seen)
+	}
+
+	runID, _ := parseInt64(study.Status.RunID)
+	observed, err := r.observations(ctx, study, runID)
+	if err != nil {
+		return state, err
+	}
+	seed := cfg.Seed
+	if seed == 0 {
+		seed = seedFromUID(string(study.UID))
+	}
+
+	points, done, err := r.askStrategy(ctx, study, askInput{
+		seed:     seed,
+		count:    want,
+		cfg:      cfg,
+		rawCfg:   rawConfigBytes(study.Spec.Space.Strategy.Config),
+		budget:   study.Spec.Budgets,
+		observed: observed,
+		pending:  sortedKeys(pending),
+		seen:     seen,
+	})
+	if err != nil {
+		return state, err
+	}
+	state.done = done
+
+	for _, a := range points {
+		if maxPoints > 0 && len(seen) >= maxPoints {
+			break
+		}
+		h := space.CanonicalHash(a)
 		if seen[h] {
 			continue
 		}
+		n, err := r.ensureTrials(ctx, study, screeningPoint{configHash: h, assignments: a})
+		if err != nil {
+			return state, err
+		}
 		seen[h] = true
-		out = append(out, p)
+		state.total += n
 	}
-	return out, nil
+	return state, nil
+}
+
+// ensureTrials materializes one config point against every workload and returns how
+// many trials it created. A config that wins under one load shape and loses under
+// another is exactly what the study exists to surface, so every point screens against
+// every workload. A study with no workloads still materializes its points.
+func (r *StudyReconciler) ensureTrials(ctx context.Context, study *v1alpha1.Study, p screeningPoint) (int, error) {
+	if len(study.Spec.Workloads) == 0 {
+		if err := r.ensureTrial(ctx, study, p, -1); err != nil {
+			return 0, err
+		}
+		return 1, nil
+	}
+	for i := range study.Spec.Workloads {
+		if err := r.ensureTrial(ctx, study, p, i); err != nil {
+			return i, err
+		}
+	}
+	return len(study.Spec.Workloads), nil
+}
+
+// terminalTrialPhase reports whether a trial has stopped moving.
+func terminalTrialPhase(p v1alpha1.TrialPhase) bool {
+	switch p {
+	case v1alpha1.TrialPhaseCollected, v1alpha1.TrialPhaseFailed,
+		v1alpha1.TrialPhaseAborted, v1alpha1.TrialPhaseInvalid:
+		return true
+	default:
+		return false
+	}
 }
 
 func parseStrategyConfig(raw *runtime.RawExtension) strategyConfig {
@@ -254,6 +363,23 @@ func parseStrategyConfig(raw *runtime.RawExtension) strategyConfig {
 		_ = json.Unmarshal(raw.Raw, &c)
 	}
 	return c
+}
+
+// rawConfigBytes returns a RawExtension's bytes, or nil.
+func rawConfigBytes(raw *runtime.RawExtension) []byte {
+	if raw == nil {
+		return nil
+	}
+	return raw.Raw
+}
+
+func sortedKeys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // ensureTrial creates one screening Trial CR for a (config point, workload) pair,
@@ -290,8 +416,8 @@ func (r *StudyReconciler) ensureTrial(ctx context.Context, study *v1alpha1.Study
 	}
 
 	labels := map[string]string{
-		"parallax.dev/study": study.Name,
-		"parallax.dev/mode":  string(v1alpha1.TrialModeScreening),
+		studyLabel:          study.Name,
+		"parallax.dev/mode": string(v1alpha1.TrialModeScreening),
 	}
 	if workloadName != "" {
 		labels["parallax.dev/workload"] = workloadName

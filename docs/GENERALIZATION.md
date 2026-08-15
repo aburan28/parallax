@@ -47,8 +47,8 @@ models no protocol and no load shape at all.
 
 ### Status
 
-**Phase 1 has landed** (schema + the clock work B requires). Gap headings below are marked
-`LANDED` or `OPEN`; §3 tracks what remains.
+**Phase 1 has landed** (schema + the clock work B requires), **and G3** (the strategy
+seam). Gap headings below are marked `LANDED` or `OPEN`; §3 tracks what remains.
 
 The core no longer contains the words replay, rate, cell, or request. Concretely:
 `Workload` is a driver reference plus an opaque config block; a workload declares whether
@@ -59,6 +59,11 @@ provider plugin, from the driver's own metrics, or from an in-core expression;
 target config path; and a default chart install grants no vendor API group.
 `examples/studies/nightly-etl-runtime.yaml` is the proof: a batch ETL study with no
 traffic, no latency percentile, and no kapture object anywhere in it.
+
+Search is now genuinely pluggable: a study names `builtin:grid` / `builtin:random` or a
+`Plugin` CR, unresolvable names fail the study instead of becoming a grid, and the
+controller asks in batches so an adaptive strategy sees results before choosing its next
+points.
 
 ---
 
@@ -173,7 +178,7 @@ and avoids a seventh kind.
 
 ---
 
-### G3 — Strategy plugins are never called  ·  `OPEN` · **P0**
+### G3 — Strategy plugins are never called  ·  `LANDED`
 
 **Coupling.** `internal/controller/study_controller.go:193-216`:
 
@@ -196,18 +201,31 @@ not work. Worse, the **substring match is a landmine**: a plugin named
 plugin name silently becomes grid — no error, no event, no status condition. A user gets
 plausible-looking results from a strategy they did not choose.
 
-**Change.** Two steps, both small:
+**Change (shipped).**
 
-1. **Immediately:** replace substring matching with exact names and an explicit builtin
-   namespace (`builtin:grid`, `builtin:random`). Anything else that is not a Ready
-   `strategy` plugin must fail the Study with a condition, not fall back silently.
-2. **M1:** drive the ask/tell loop — `Init(space_json, budget_json, seed)` once per run,
-   `Ask(count)` per sweep batch, `Tell(config_hash, objective, feasible)` as trials
-   collect, `Report().done` to terminate. This also delivers the adaptive strategies
-   (ASHA/Optuna) that the current one-shot expansion cannot express: today the whole space
-   is materialized up front (`materializeSweep`), so no strategy can *react* to results.
+1. **Explicit resolution, no fallback.** `builtin:grid` and `builtin:random` run
+   compiled-in; every other name must be a Ready `Plugin`. An unknown builtin or an
+   unreachable plugin fails the study with the reason on `status.conditions` — losing a
+   study to a clear error beats finishing one whose results describe a search nobody
+   asked for.
+2. **A real ask loop.** The controller asks for a batch (`space.strategy.config.batchSize`,
+   default 8), materializes it, and re-asks only when trials drop out of flight — so an
+   adaptive strategy actually sees the previous batch. The old whole-space expansion
+   could never give a strategy any feedback, which is why nothing beyond grid could work.
+3. **`Ask` is stateless** — see DESIGN.md §14.1. The four-RPC `Init/Ask/Tell/Report`
+   shape could not work here: it carried no session key, so two concurrent studies shared
+   one cursor in `strategy-grid`, and any hot reload (which the platform does *by design*)
+   would silently discard the search. `Ask` now takes the full observation history, which
+   the controller rebuilds from the results DB — the same data that makes a study
+   resumable across an operator restart.
+4. **`pkg/plugin.CanonicalHash`.** Config-point identity moved from `internal/space` into
+   the public SDK, because the host tells a strategy which points are taken *by hash*; a
+   third-party strategy in another module has to compute the identical value.
 
-**Breaking?** No API change. Behavioral, and the current behavior is arguably a bug.
+`strategy-sobol` and `strategy-asha` remain unimplemented, but now fail with a reason
+naming what is missing rather than a bare `Unimplemented`.
+
+**Breaking?** The Strategy ABI changed shape (v1alpha1, pre-release). No CRD change beyond strategy *names*: studies must now say `builtin:grid` rather than relying on a substring match.
 
 ---
 
@@ -436,12 +454,10 @@ metrics became a first-class SLI source instead (`slis[].driver`). The streaming
 cannot consume a stream — the streaming seam had no possible caller, which is why the
 abort policy was inert.
 
-**Phase 2 — the remaining seams. `OPEN`.**
-- **G3, the highest-value item left:** drive the strategy ask/tell loop, and immediately
-  replace the substring match on plugin names with exact `builtin:grid` / `builtin:random`
-  plus a hard failure for an unknown strategy. Until this lands, "bring your own search"
-  does not work and an unrecognized strategy silently becomes grid.
-- **G7:** `target.Reset` between trials (today trial *n* inherits trial *n−1*'s state);
+**Phase 2 — the remaining seams.**
+- **G3. `LANDED`.** Explicit strategy resolution, a batched ask loop, and a stateless
+  `Ask` that survives hot reload and concurrent studies. "Bring your own search" works.
+- **G7. `OPEN`:** `target.Reset` between trials (today trial *n* inherits trial *n−1*'s state);
   `target.Contract` at admission, which needs the validating webhook that does not yet
   exist (G4's admission half); `loaddriver.Plan` pre-flight; provider `Capabilities`;
   scenario and exporter wiring.

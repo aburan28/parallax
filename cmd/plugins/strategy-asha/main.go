@@ -23,6 +23,7 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 
@@ -39,6 +40,15 @@ const pluginName = "asha"
 // TODO(m3): implement Strategy RPCs (ASHA rungs, promotion, Ask/Tell/Report).
 type server struct {
 	pluginv1.UnimplementedStrategyServer
+}
+
+// Ask fails loudly rather than inheriting the generic "method not implemented"
+// from the embedded UnimplementedStrategyServer. A study naming this strategy fails
+// with a reason that says what is missing, instead of quietly searching something
+// else — the failure mode this seam was rebuilt to remove.
+func (s *server) Ask(_ context.Context, _ *pluginv1.AskRequest) (*pluginv1.AskResponse, error) {
+	return nil, fmt.Errorf("strategy-asha is not implemented yet (Asynchronous Successive Halving with early stopping); " +
+		"use builtin:grid, builtin:random or strategy-random until it lands — see docs/DESIGN.md §14")
 }
 
 func main() {

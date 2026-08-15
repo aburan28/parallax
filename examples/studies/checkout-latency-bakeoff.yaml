@@ -39,7 +39,8 @@ spec:
     constraints:
       - "gomemlimit == '' || cpuLimit != '1000m' || replicas >= 3"
     strategy:
-      plugin: strategy-grid            # 4×3×2×5 = 120 points, pruned by constraints
+      plugin: builtin:grid             # 4×3×2×5 = 120 points, pruned by constraints
+      config: { batchSize: 12 }        # points in flight before the strategy is re-asked
 
   workloads:
     - name: prod-shape-1x

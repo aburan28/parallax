@@ -35,7 +35,10 @@ spec:
     constraints:
       - "agent.batchSize * int(agent.maxBodyBytes) <= 2147483648"
     strategy:
-      plugin: strategy-random
+      # builtin: runs compiled into the operator, so --local needs no plugin install.
+      # An unprefixed name is a Plugin CR that must be Ready; there is no fallback
+      # between the two (docs/GENERALIZATION.md G3).
+      plugin: builtin:random
       config: { points: 40, seed: 17 }
 
   workloads:

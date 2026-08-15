@@ -47,8 +47,10 @@ spec:
       # Keep total cluster memory inside the pool the bench namespace is given.
       - "executors * int(executorMemory.replace('g','')) <= 96"
     strategy:
-      plugin: strategy-sobol
-      config: { points: 48, seed: 7 }
+      # A Plugin CR, not a builtin: the search runs in a subprocess over the same
+      # stateless Ask ABI any third-party strategy uses.
+      plugin: strategy-random
+      config: { points: 48, seed: 7, batchSize: 6 }
 
   workloads:
     - name: one-nights-partitions

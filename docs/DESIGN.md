@@ -101,7 +101,7 @@ flowchart LR
                 SCN[[scenario-*]]
                 EXP[[exporter-*]]
             end
-            SC <-->|ask/tell| STRAT
+            SC <-->|ask| STRAT
             TC --> TGT & LD & MP & SCN
         end
         CRD[(Study · Trial<br/>Plugin · Dataset CRs)] --> SC & PC & DC
@@ -185,7 +185,7 @@ Everything extends through one mechanism: **gRPC subprocess plugins** behind a v
 | `target` | `Prepare / Apply / Ready / Reset / Contract` | `target-kapture` (chart overlays, CR patches, health gates, **readback fidelity provider**), `target-helm` (generic values/patches) | trial boundary |
 | `loaddriver` | `Plan / Start / Progress / Stop` | `loaddriver-kapture` (CaptureLoadTest composition + rollup watch; `direct` mode runs engine Jobs without the hub) | trial boundary |
 | `provider` | `Capabilities / Collect(window, queries) / Snapshot` | `provider-prometheus` (any PromQL-compatible endpoint: Prometheus, Thanos, Mimir, VictoriaMetrics, Cortex), `provider-otlp` (hosts an OTLP receiver; SUTs/engines push OTel metrics, provider aggregates over the window), | trial boundary |
-| `strategy` | `Init(space, budget) / Ask / Tell / Report` | `strategy-grid`, `strategy-random`, `strategy-sobol`, `strategy-asha` (also compiled in for `--local` zero-dep runs), `strategy-optuna` (Python) | between ask/tell calls |
+| `strategy` | `Ask(space, budget, seed, observations, pending)` — stateless | `builtin:grid` / `builtin:random` compiled in for `--local` zero-dep runs; `strategy-grid`, `strategy-random`, `strategy-sobol`, `strategy-asha`, `strategy-optuna` (Python) as Plugin CRs | between Ask calls |
 | `scenario` | `Inject / Verify / Revert (stream events)` | `scenario-pod-kill`, `scenario-netpol-outage`, `scenario-rate-burst`, `scenario-hpa-ramp` | trial boundary |
 | `exporter` | `Export(event, refs)` | `exporter-webhook`, `exporter-slack`, `exporter-ocibundle` (pushes report bundles as OCI artifacts) | anytime (idempotent) |
 
@@ -234,7 +234,7 @@ The Plugin controller resolves the image, **verifies the cosign signature** per 
 ### 5.4 Hot reload
 
 - The host fsnotify-watches the plugin dir (debounced ~500ms, matching kapture). A changed binary (new digest from a `Plugin` CR update rolling through the installer) triggers **drain-and-swap**: `Drain()` the old subprocess (bounded grace, default 30s), launch the new one, `Describe`/`Configure`, then route new calls to it. A failed reload keeps the old process running and marks the `Plugin` CR `Degraded` with an Event — never a silent downgrade to nothing.
-- **Swap boundaries protect trial integrity** (§5.1): `target`, `loaddriver`, `provider`, and `scenario` plugins are only swapped *between* trials — a running trial pins its plugin set (the resolved digests are part of the trial's environment fingerprint, so a mid-study plugin upgrade is visible in the data and validation refuses to mix fingerprints). `strategy` swaps between ask/tell calls; `exporter` swaps anytime.
+- **Swap boundaries protect trial integrity** (§5.1): `target`, `loaddriver`, `provider`, and `scenario` plugins are only swapped *between* trials — a running trial pins its plugin set (the resolved digests are part of the trial's environment fingerprint, so a mid-study plugin upgrade is visible in the data and validation refuses to mix fingerprints). `strategy` swaps between `Ask` calls (it holds no state to lose); `exporter` swaps anytime.
 - Rollback = re-point the `Plugin` CR at the previous digest; same path, no special case. GitOps-friendly by construction.
 
 ### 5.5 Plugin security model
@@ -661,7 +661,21 @@ Parallax adopts the abstractions from kapture draft PR #18 (`hpo-benchmark/`, Py
 | `analysis.py` — best-so-far curves, step-wise interpolation onto a common grid, median + IQR across seeds, mean-rank aggregation | `internal/analysis` anytime curves in the study report; rank aggregation used when comparing *strategies* in the conformance suite | Simple-regret framing applies only to synthetic problems (known optimum); real studies report best-config trajectories |
 | `adapters/{random_search, optuna_adapter}.py` | `strategy-random` built-in; `strategy-optuna` as a Python subprocess plugin on the same ABI | Random search stays permanently in the lineup as the sanity floor |
 
-Built-ins (`grid`, `random`, `sobol`, `asha`) ship both as plugin binaries and compiled into the operator/CLI for zero-dependency `--local` runs — same interface either way. External strategies (Optuna/TPE, SMAC, Ax) are ordinary `Plugin` CRs; the Python SDK keeps them ~200 lines. **Fidelity** for ASHA is `(measureDuration, reps)`: survivors promote from 2-min to 5-min to validation-grade windows. Low-fidelity trials carry the caveat PR #18's `NoisyBranin` models deliberately — they are *biased*, not just noisy (short windows overweight warmup effects) — which is exactly why promotion decisions only ever read validation-fidelity data.
+Built-ins ship both as plugin binaries and compiled into the operator/CLI for zero-dependency `--local` runs — same interface either way. A study names its search explicitly: `builtin:grid` and `builtin:random` run compiled-in, and **any other name is a `Plugin` CR that must be Ready**. There is no fuzzy matching and no fallback between the two, because a study that silently searched a different space than the one it declared has produced worthless results; an unresolvable strategy fails the study with the reason on `status.conditions`. External strategies (Optuna/TPE, SMAC, Ax) are ordinary `Plugin` CRs; the Python SDK keeps them ~200 lines. **Fidelity** for ASHA is `(measureDuration, reps)`: survivors promote from 2-min to 5-min to validation-grade windows. Low-fidelity trials carry the caveat PR #18's `NoisyBranin` models deliberately — they are *biased*, not just noisy (short windows overweight warmup effects) — which is exactly why promotion decisions only ever read validation-fidelity data.
+
+### 14.1 Why `Ask` is stateless
+
+PR #18's `optimizer.py` is a stateful object: `ask()` and `tell()` mutate a search that lives across calls. Parallax deliberately does **not** carry that shape into the ABI. `Ask` is a pure function of `(space, budget, seed, observations, pending)` — the host passes the full evaluation history on every call, and the plugin holds nothing between calls.
+
+Three properties of this platform force it:
+
+- **Plugins hot-reload** (§5.4). A drain-and-swap mid-study would silently discard a stateful optimizer's search tree. Statelessness makes reload a non-event.
+- **One process serves every study.** A `Plugin` CR is a single subprocess; per-study session state inside it would have to be keyed, isolated, and garbage-collected, and getting that wrong cross-contaminates two studies' searches. The old `Init/Ask` pair had no session key at all, so two concurrent studies shared one cursor.
+- **The results DB is already the history** (§15). Rebuilding observations from it is what makes a study resumable after an operator restart — the controller has no memory between reconciles either, so passing history is the only shape that survives a crash.
+
+The cost is that a strategy re-derives its internal state per batch. For expensive optimizers this is real, and the mitigation is ordinary caching keyed on a hash of the observation set — a plugin concern, not an ABI one. The controller asks in batches (`space.strategy.config.batchSize`, default 8) and only re-asks when there is room in flight, so an adaptive strategy still sees each batch's results before choosing the next.
+
+The evaluation loop stays in the Study controller: a strategy suggests points, it never decides how many trials get spent.
 
 ---
 

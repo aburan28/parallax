@@ -1,6 +1,18 @@
-// Strategy plugins drive the search: Init(space, budget) then repeated Ask/Tell,
-// with Report for anytime curves (DESIGN.md §5.1, §14). Swap boundary: between
-// ask/tell calls.
+// Strategy plugins drive the search: given the space, the budget, and everything
+// observed so far, suggest the next batch of config points (DESIGN.md §5.1, §14).
+//
+// Ask is a *pure function* of its request. A strategy holds no session state across
+// calls, and the host passes the full observation history every time. That is not a
+// stylistic choice: the plugin host hot-reloads plugins with drain-and-swap (§5.4)
+// and one plugin process serves every study in the cluster, so per-session state in
+// the plugin would be lost on reload and cross-contaminated between concurrent
+// studies. Stateless Ask also means a study resumes from the results DB exactly
+// where it left off, because the DB *is* the history (docs/GENERALIZATION.md G3).
+//
+// The evaluation loop stays in the Study controller — a strategy suggests, it never
+// decides how many trials get spent (§14).
+//
+// Swap boundary: between Ask calls.
 syntax = "proto3";
 
 package parallax.plugin.v1;
@@ -8,54 +20,59 @@ package parallax.plugin.v1;
 option go_package = "github.com/aburan28/parallax/proto/plugin/v1;pluginv1";
 
 service Strategy {
-  rpc Init(InitRequest) returns (InitResponse);
   rpc Ask(AskRequest) returns (AskResponse);
-  rpc Tell(TellRequest) returns (TellResponse);
-  rpc Report(ReportRequest) returns (ReportResponse);
 }
 
-message InitRequest {
+// Observation is one evaluated config point: what was tried, and how it scored.
+message Observation {
+  string config_hash = 1;
+  // Dimension name → chosen value, as suggested.
+  map<string, string> assignments = 2;
+  // The study's primary objective, already normalized to "lower is better" so a
+  // strategy never has to read the study's direction.
+  double objective = 3;
+  // False when a guardrail was breached or the trial was invalid; infeasible points
+  // still inform the search (that region is bad) but are never optima.
+  bool feasible = 4;
+  // Measurement window in seconds — the fidelity dial multi-fidelity strategies
+  // (ASHA and friends) rung on.
+  double fidelity_seconds = 5;
+  int32 rep = 6;
+  // Wall-clock cost of evaluating this point, for cost-aware strategies.
+  double cost_seconds = 7;
+  // All SLI values for the point, for strategies that model more than the objective.
+  bytes metrics_json = 8;
+}
+
+message AskRequest {
   // Search space (dimensions + constraints) serialized as JSON (§8 space block).
   bytes space_json = 1;
   // Budget currencies (maxTrials / maxClusterTime / maxWallClock) as JSON.
   bytes budget_json = 2;
+  // Run seed. Identical (seed, observations) must yield identical suggestions.
   int64 seed = 3;
-}
-
-message InitResponse {
-  bool ok = 1;
-  string detail = 2;
+  // How many points the controller wants. A strategy may return fewer.
+  int32 count = 4;
+  // Every point observed for this run so far.
+  repeated Observation observations = 5;
+  // Config hashes already materialized as trials but not yet observed. A strategy
+  // must not re-suggest these, and may use them to spread out an in-flight batch.
+  repeated string pending = 6;
+  // The strategy's own config block from the study's space.strategy.config.
+  bytes config_json = 7;
 }
 
 message Suggestion {
   string config_hash = 1;
-  // Dimension path → chosen value.
+  // Dimension name → chosen value.
   map<string, string> assignments = 2;
-}
-
-message AskRequest {
-  int32 count = 1;
 }
 
 message AskResponse {
   repeated Suggestion suggestions = 1;
-}
-
-message TellRequest {
-  string config_hash = 1;
-  double objective = 2;
-  bool feasible = 3;
-  bytes metrics_json = 4;
-}
-
-message TellResponse {
-  bool ok = 1;
-}
-
-message ReportRequest {}
-
-message ReportResponse {
-  bytes report_json = 1;
-  // True when the strategy has exhausted its budget / converged.
+  // Done reports that the strategy has exhausted its space or converged. The
+  // controller stops sweeping; an empty suggestion list alone does not mean done,
+  // since a strategy may simply be waiting on in-flight results.
   bool done = 2;
+  string detail = 3;
 }
