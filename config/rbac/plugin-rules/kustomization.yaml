@@ -1,0 +1,13 @@
+# Opt-in RBAC for plugins that need more than the generic SUT surface.
+#
+# Plugins run as subprocesses of the manager and act with its ServiceAccount, so
+# their permissions have to be granted to that account. Include only the bundles
+# your installed plugins actually need (docs/GENERALIZATION.md G8):
+#
+#   resources:
+#     - ../rbac/plugin-rules/kapture.yaml   # loaddriver-kapture, target-kapture
+#     - ../rbac/plugin-rules/jobs.yaml      # loaddriver-batchjob, direct-mode engines
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources: []

@@ -28,10 +28,23 @@ message PrepareResponse {
   string detail = 2;
 }
 
+// DimensionAssignment is one resolved axis of a config point, carrying the target
+// config location the study mapped it to (docs/GENERALIZATION.md G4).
+message DimensionAssignment {
+  // Dimension name as written in the study's space block.
+  string name = 1;
+  // Chosen value for this trial, rendered as a string.
+  string value = 2;
+  // Target config location: a Helm value path, a JSON pointer, a flag name. Defaults
+  // to name when the study omits it.
+  string path = 3;
+  // Richer target-defined mapping for axes a single path cannot express.
+  bytes mapping_json = 4;
+}
+
 message ApplyRequest {
   string config_hash = 1;
-  // Resolved dimension assignments (dimension path → value), e.g. agent.batchSize=512.
-  map<string, string> dimensions = 2;
+  repeated DimensionAssignment assignments = 2;
   bytes raw_config_json = 3;
 }
 
@@ -64,7 +77,8 @@ message ResetResponse {
 }
 
 message ContractRequest {
-  repeated string dimension_names = 1;
+  // The study's declared axes (values unset — this is an admission-time check).
+  repeated DimensionAssignment dimensions = 1;
 }
 
 message ContractResponse {

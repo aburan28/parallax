@@ -1,0 +1,20 @@
+# Example Dataset registration: a corpus that was never captured from traffic.
+#
+# An object-storage source is just a prefix full of records. Nothing about it is
+# HTTP-shaped, and no kapture object is involved — this is the dataset backing
+# examples/studies/nightly-etl-runtime.yaml (docs/GENERALIZATION.md G2).
+apiVersion: parallax.dev/v1alpha1
+kind: Dataset
+metadata:
+  name: events-2026-07-14
+  namespace: data-bench
+spec:
+  source:
+    kind: object-storage
+    uri: s3://data-bench/events/2026-07-14/
+    config:
+      format: parquet
+      # Verification is the consuming driver's job: only it knows the record format.
+      # TODO(m1): delegate to the workload's loaddriver (docs/GENERALIZATION.md G2).
+      expectedRecords: 412_000_000
+  storageRef: { name: bench-dataset-store }

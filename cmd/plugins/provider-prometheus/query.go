@@ -47,6 +47,25 @@ type promResponse struct {
 	} `json:"data"`
 }
 
+// sliConfig is this provider's query dialect, as written under a study's
+// slis[].from.config. Keeping the dialect here rather than in the Study CRD is what
+// lets a third-party provider define a different one (docs/GENERALIZATION.md G6).
+type sliConfig struct {
+	Query string `json:"query"`
+}
+
+// promQLFromConfig extracts the PromQL from an SLI's provider config block.
+func promQLFromConfig(raw []byte) (string, error) {
+	if len(raw) == 0 {
+		return "", fmt.Errorf("provider-prometheus: sli has no from.config block; expected {\"query\": <PromQL>}")
+	}
+	var cfg sliConfig
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return "", fmt.Errorf("provider-prometheus: decode from.config: %w", err)
+	}
+	return cfg.Query, nil
+}
+
 // windowRange derives the PromQL range-vector duration (e.g. "300s") from the
 // recorded measurement window and returns the instant (t2) to evaluate the query at.
 func windowRange(win *pluginv1.Window) (string, time.Time, error) {

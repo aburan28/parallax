@@ -32,21 +32,33 @@ The **API surface and the wiring** are not generic. Two distinct problems:
 Nine gaps follow, ranked. G1–G4 block a non-kapture user outright. G5–G8 block a healthy
 third-party plugin ecosystem. G9 is cleanup.
 
-### A scope question that needs an owner's answer first
+### Scope: reading B — workload-agnostic
 
-§1 currently states a non-goal: *"Not load testing arbitrary protocols. v1 speaks what
-kapture replays: HTTP and gRPC."* Two readings of "more generic" follow from it, and they
-cost very differently:
+Two readings of "more generic" were on the table:
 
-| Reading | Meaning | Scope |
-| --- | --- | --- |
-| **A — kapture-optional** | Any HTTP/gRPC service, any load generator (k6, JMeter, Locust, wrk, a bespoke harness), any dataset source. Kapture becomes one plugin among several. | G1–G8, no ABI redesign beyond the run report |
-| **B — workload-agnostic** | Also non-request/response systems: batch jobs, stream processors, databases (TPC-C/YCSB), training jobs, LLM eval harnesses. | A, plus dropping `RunReport`'s fixed fields entirely and decoupling the trial clock from "load start/stop" |
+| Reading | Meaning |
+| --- | --- |
+| **A — kapture-optional** | Any HTTP/gRPC service, any load generator (k6, JMeter, Locust, wrk, a bespoke harness), any dataset source. Kapture becomes one plugin among several. |
+| **B — workload-agnostic** | Also non-request/response systems: batch jobs, stream processors, databases (TPC-C/YCSB), training jobs, LLM eval harnesses. Adds dropping `RunReport`'s fixed fields entirely and decoupling the trial clock from "load start/stop". |
 
-Everything below serves A. Where B needs more, it is marked **[B]**. A is the recommended
-first target: it is mostly schema work, it is what the `target-helm` /
-`checkout-latency-bakeoff` example already promises, and it leaves B a compatible next
-step.
+**B is the chosen scope.** §1's old non-goal — *"Not load testing arbitrary protocols. v1
+speaks what kapture replays: HTTP and gRPC"* — has been replaced accordingly: parallax
+models no protocol and no load shape at all.
+
+### Status
+
+**Phase 1 has landed** (schema + the clock work B requires). Gap headings below are marked
+`LANDED` or `OPEN`; §3 tracks what remains.
+
+The core no longer contains the words replay, rate, cell, or request. Concretely:
+`Workload` is a driver reference plus an opaque config block; a workload declares whether
+its window is closed by a duration or by the driver reporting done; the load-driver ABI
+carries `map<string,double> metrics` instead of an HTTP run report; SLIs read from a
+provider plugin, from the driver's own metrics, or from an in-core expression;
+`Dataset` sources are discriminated with kapture as one kind; dimensions carry an explicit
+target config path; and a default chart install grants no vendor API group.
+`examples/studies/nightly-etl-runtime.yaml` is the proof: a batch ETL study with no
+traffic, no latency percentile, and no kapture object anywhere in it.
 
 ---
 
@@ -73,7 +85,12 @@ proto headers are **comments crediting prior art**. They are fine; they are not 
 
 ## 2. Gaps
 
-### G1 — `Study.spec.workloads[]` is a traffic-replay struct  ·  **P0**
+Each gap below records **the state at review time** — the coupling, the evidence, and the
+proposed change — with a status marker on the heading. Line references are to `3d6fc72`
+and will drift; they are kept as the audit trail for why each change was made, not as a
+map of the current tree.
+
+### G1 — `Study.spec.workloads[]` is a traffic-replay struct  ·  `LANDED`
 
 **Coupling.** `api/v1alpha1/study_types.go:137-184`. `Workload` requires `datasetRef` and
 `replay`; `ReplaySpec` is annotated *"mirrors CaptureLoadTest.spec field names"* (`:150`)
@@ -122,7 +139,7 @@ controller path), expensive after a v1beta1. Do it first.
 
 ---
 
-### G2 — `Dataset` is a kapture capture, by definition  ·  **P0**
+### G2 — `Dataset` is a kapture capture, by definition  ·  `LANDED` (schema) / `OPEN` (verification)
 
 **Coupling.** `api/v1alpha1/dataset_types.go:34-43`. `spec.captureRef` is **required** and
 documented as *"the kapture TrafficCapture this dataset was recorded from"*;
@@ -156,7 +173,7 @@ and avoids a seventh kind.
 
 ---
 
-### G3 — Strategy plugins are never called  ·  **P0**
+### G3 — Strategy plugins are never called  ·  `OPEN` · **P0**
 
 **Coupling.** `internal/controller/study_controller.go:193-216`:
 
@@ -194,7 +211,7 @@ plausible-looking results from a strategy they did not choose.
 
 ---
 
-### G4 — Dimension → config mapping has no home in the API  ·  **P0**
+### G4 — Dimension → config mapping has no home in the API  ·  `LANDED` (schema) / `OPEN` (admission)
 
 **Coupling.** `api/v1alpha1/study_types.go:104-115`. A `Dimension` is `{name, int |
 float | categorical}` — and §8 (`DESIGN.md:425`) states *"dimension names are
@@ -227,7 +244,7 @@ and there is no admission webhook (`internal/webhook/` does not exist).
 
 ---
 
-### G5 — The load-driver ABI hard-codes kapture's run report  ·  **P1**
+### G5 — The load-driver ABI hard-codes kapture's run report  ·  `LANDED`
 
 **Coupling.** `proto/plugin/v1/loaddriver.proto:56-70`:
 
@@ -281,7 +298,7 @@ its own metric names.
 
 ---
 
-### G6 — `SLISpec` conflates provider, dialect, and class  ·  **P1**
+### G6 — `SLISpec` conflates provider, dialect, and class  ·  `LANDED` (schema) / `OPEN` (derived eval)
 
 **Coupling.** `api/v1alpha1/study_types.go:186-199` — `{name, provider, query, expr,
 class}`. Two query dialects are enumerated in the core API: `query` for PromQL-ish
@@ -316,7 +333,7 @@ deprecated shorthands that the controller folds into `From.Config` for one relea
 
 ---
 
-### G7 — Half the extension seams are never exercised  ·  **P1**
+### G7 — Half the extension seams are never exercised  ·  `OPEN` · **P1**
 
 | Kind | ABI RPCs | Called by core | Effect |
 | --- | --- | --- | --- |
@@ -336,7 +353,7 @@ fake driver is the cheapest proof that G1–G5 actually landed.
 
 ---
 
-### G8 — Plugins inherit the operator's identity, so their RBAC lives in the core chart  ·  **P1**
+### G8 — Plugins inherit the operator's identity, so their RBAC lives in the core chart  ·  `LANDED` (step 1) / `OPEN` (steps 2–3)
 
 **Coupling.** Plugins are `exec.Command` subprocesses in the manager pod
 (`internal/pluginhost/process.go:53-60`) — same ServiceAccount, same NetworkPolicy, same
@@ -380,7 +397,7 @@ operator needs it; the point is that no one chose it.)
 
 ---
 
-### G9 — Local environment, naming, and the k8s assumption  ·  **P2**
+### G9 — Local environment, naming, and the k8s assumption  ·  `OPEN` · **P2**
 
 - `internal/env/env.go:31-84` enumerates the local stack as a fixed list: kapture, Envoy
   Gateway, MinIO, prom-lite — all `Optional: false`, including the SUT itself. `--local`
@@ -405,39 +422,69 @@ operator needs it; the point is that no one chose it.)
 
 ## 3. Sequencing
 
-**Phase 1 — schema (breaking, do while `v1alpha1` is young).** G1 workload/driver split ·
-G2 dataset sources · G4 dimension mapping · G6 SLI source/derived split. One PR per CRD,
-regenerate manifests, rewrite both examples. Fixes the "generic" example so it validates.
+**Phase 1 — schema and the trial clock. `LANDED`.** G1 workload/driver split · G2 dataset
+sources · G4 dimension paths · G5 open driver metrics + `run_ref` + `Progress` · G6 SLI
+source split (with `driver` as a third source) · the [B] clock work: warmup, measure,
+cooldown and `maxDuration` are all honored, and `completion: driver` lets a
+run-to-completion workload end its own window · G8 step 1 (vendor RBAC out of the base
+install) · trials materialize per workload rather than only `workloads[0]`.
 
-**Phase 2 — wire the seams.** G3 strategy ask/tell (plus the immediate substring-match
-fix) · G5 `run_ref` + `Watch` + honoring `warmup`/`measure` · `target.Reset` between
-trials and `Contract` at admission · provider `Capabilities`. Each is small; together they
-turn the ABI from documentation into contract.
+Two things were removed rather than ported. `provider-runreport` is gone: its job was to
+re-read kapture CR statuses for metrics the core already holds after `Stop`, so driver
+metrics became a first-class SLI source instead (`slis[].driver`). The streaming
+`LoadDriver.Watch` RPC is gone in favour of unary `Progress`, because a reconcile loop
+cannot consume a stream — the streaming seam had no possible caller, which is why the
+abort policy was inert.
 
-**Phase 3 — ecosystem.** G8 RBAC extraction (step 1 is a one-hour change; do it in Phase 1
-if the chart is being touched anyway) · conformance suites per kind, run against
-deliberately non-kapture fakes · `scenario` and `exporter` wiring.
+**Phase 2 — the remaining seams. `OPEN`.**
+- **G3, the highest-value item left:** drive the strategy ask/tell loop, and immediately
+  replace the substring match on plugin names with exact `builtin:grid` / `builtin:random`
+  plus a hard failure for an unknown strategy. Until this lands, "bring your own search"
+  does not work and an unrecognized strategy silently becomes grid.
+- **G7:** `target.Reset` between trials (today trial *n* inherits trial *n−1*'s state);
+  `target.Contract` at admission, which needs the validating webhook that does not yet
+  exist (G4's admission half); `loaddriver.Plan` pre-flight; provider `Capabilities`;
+  scenario and exporter wiring.
+- **G6 remainder:** derived-SLI expression evaluation. The schema is correct now
+  (`slis[].derived.expr`) but nothing evaluates it, so derived SLIs resolve as not-ok.
+  This wants the same expression engine as `space.constraints`, which is also unevaluated
+  — one dependency, two features.
+- **G2 remainder:** delegate dataset verification to the driver that consumes the corpus;
+  `status.idDigest` is still a placeholder derived from the source identity.
+
+**Phase 3 — ecosystem. `OPEN`.** G8 steps 2–3 (per-plugin ClusterRoles declared by the
+`Plugin` CR; out-of-pod plugin transport) · conformance suites per kind, run against
+deliberately non-kapture fakes · G9.
 
 **Explicit non-goals.** Do not generalize the results-DB schema (already domain-neutral),
-the statistics core, the plugin handshake/hot-reload machinery, or the operator model. Do
-not make the ABI protocol-agnostic beyond the metrics map in G5 unless reading **B** is
-chosen.
-
----
+the statistics core, the plugin handshake/hot-reload machinery, or the operator model.
 
 ## 4. Definition of done
 
-One acceptance test settles the whole question. Add `examples/studies/` a study that:
+One acceptance test settles the whole question — a study that:
 
 - targets a plain Deployment via `target-helm` (no kapture chart, no `capture.gateway.io`
   object created at any point);
-- drives load with a **non-kapture driver** — a `loaddriver-fake` in `test/` that emits
-  synthetic metrics is enough to prove the seam, `loaddriver-k6` proves it usefully;
+- drives load with a **non-kapture driver**;
 - registers its corpus as a `Dataset` with `source.kind: object-storage`;
-- reads SLIs from `provider-prometheus` plus one `derived` SLI;
+- reads SLIs from `provider-prometheus` plus in-core sources;
 - searches with a `strategy` **plugin**, not a builtin;
 - runs green on a kind cluster whose install has **no kapture CRDs and no
   `capture.gateway.io` RBAC**.
 
-If that study runs, the platform is generic in reading **A**. Every gap above is a line
-item on making it run; nothing else in this document matters more than that test existing.
+`examples/studies/nightly-etl-runtime.yaml` is that study, and it goes further than the
+original bar: its workload is a batch ETL job, so there is no traffic and no latency
+percentile anywhere in it. Every clause above is now *expressible*, and the last one is
+true by default — `helm template charts/parallax` emits no `capture.gateway.io` rule
+unless `rbac.plugins.kapture=true`.
+
+What the study still needs to actually *run* green: a real `loaddriver-batchjob`
+(first-party drivers are M0 skeletons), G3 so `strategy-sobol` is genuinely consulted
+rather than silently expanded as a grid, and G6's derived evaluation so
+`core_seconds_per_million_records` resolves. Those are Phase 2, and they are now the only
+things between this file and a green run — not schema.
+
+Guarding the bar: `api/v1alpha1/examples_test.go` decodes every shipped example strictly
+against the typed API. The original review found `checkout-latency-bakeoff.yaml` using a
+`dimensions[].path` field that did not exist — the API server prunes unknown fields, so it
+looked fine and did nothing. Strict decoding makes that class of drift a test failure.

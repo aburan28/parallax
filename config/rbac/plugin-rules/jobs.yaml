@@ -1,0 +1,27 @@
+# Job creation — needed by load drivers that run their workload as a Job
+# (loaddriver-batchjob, direct-mode replay engines).
+#
+# Bound directly to the manager ServiceAccount: the base manager ClusterRole has no
+# aggregationRule (adding one would let the aggregation controller overwrite its
+# rules), so each opt-in bundle carries its own binding.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: parallax-plugin-jobs
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: parallax-plugin-jobs
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: parallax-plugin-jobs
+subjects:
+  - kind: ServiceAccount
+    name: parallax-controller-manager
+    namespace: parallax-system

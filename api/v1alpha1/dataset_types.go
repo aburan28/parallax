@@ -30,12 +30,46 @@ const (
 	DatasetPhaseFailed   DatasetPhase = "Failed"
 )
 
+// Well-known Dataset source kinds. The list is open: any other value is passed
+// through to the driver that consumes the dataset (docs/GENERALIZATION.md G2).
+const (
+	// DatasetSourceKaptureCapture is a kapture TrafficCapture, named by Source.Ref.
+	DatasetSourceKaptureCapture = "kapture-capture"
+	// DatasetSourceObjectStorage is a corpus at an object-storage URI (s3://, gs://).
+	DatasetSourceObjectStorage = "object-storage"
+	// DatasetSourceGit is a corpus in a git repository at Source.URI.
+	DatasetSourceGit = "git"
+	// DatasetSourceGenerator is synthesized at trial time from Source.Config (a seed,
+	// a scale factor) — nothing is stored ahead of time.
+	DatasetSourceGenerator = "generator"
+)
+
 type DatasetSpec struct {
-	// CaptureRef names the kapture TrafficCapture this dataset was recorded from.
-	CaptureRef LocalRef `json:"captureRef"`
-	StorageRef LocalRef `json:"storageRef"`
+	// Source describes where the corpus comes from.
+	Source DatasetSource `json:"source"`
+	// StorageRef names the object store holding the corpus. Optional: generator and
+	// git sources are not object-storage backed.
+	// +optional
+	StorageRef *LocalRef `json:"storageRef,omitempty"`
 	// +optional
 	Preshard *PreshardSpec `json:"preshard,omitempty"`
+}
+
+// DatasetSource is a discriminated corpus reference. Kind selects the flavour; Ref,
+// URI and Config carry whatever that flavour needs.
+type DatasetSource struct {
+	// +kubebuilder:validation:MinLength=1
+	Kind string `json:"kind"`
+	// Ref names an in-cluster object for kinds that reference one — e.g. the kapture
+	// TrafficCapture for kind=kapture-capture.
+	// +optional
+	Ref *LocalRef `json:"ref,omitempty"`
+	// URI locates the corpus for kinds addressed by location.
+	// +optional
+	URI string `json:"uri,omitempty"`
+	// Config is kind-defined: record format, generator seed, git revision, ...
+	// +optional
+	Config *runtime.RawExtension `json:"config,omitempty"`
 }
 
 type PreshardSpec struct {

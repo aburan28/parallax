@@ -102,10 +102,21 @@ type SpaceSpec struct {
 }
 
 // Dimension is one axis of the search space. Exactly one of Int/Float/Categorical
-// must be set. Names are target-plugin dimension paths (e.g. agent.batchSize).
+// must be set.
 type Dimension struct {
 	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
+	// Path is the target-plugin config location this dimension writes: a Helm value
+	// path (`.env.GOGC`), a JSON pointer, a flag name — whatever the target's
+	// Contract() accepts. Defaults to Name, preserving the "dimension names are
+	// target paths" convention target-kapture relies on (DESIGN.md §8).
+	// +optional
+	Path string `json:"path,omitempty"`
+	// Mapping carries a richer target-defined mapping for dimensions a single Path
+	// cannot express (e.g. one axis fanning out to several fields). Opaque to the
+	// core; validated by the target plugin.
+	// +optional
+	Mapping *runtime.RawExtension `json:"mapping,omitempty"`
 	// +optional
 	Int *IntRange `json:"int,omitempty"`
 	// +optional
@@ -134,68 +145,102 @@ type CategoricalValues struct {
 	Values []string `json:"values"`
 }
 
+// CompletionMode decides what closes a workload's measurement window.
+const (
+	// CompletionDuration measures a fixed window: the workload is continuous and the
+	// study decides how long to watch it (steady-state load, a running service).
+	CompletionDuration = "duration"
+	// CompletionDriver lets the load driver end the window by reporting done: the
+	// workload runs to completion and its natural length *is* the measurement
+	// (a batch job, a fixed-size corpus, a benchmark suite, an eval set).
+	CompletionDriver = "driver"
+)
+
+// Workload is one load definition: a driver plugin, its driver-defined config, and
+// the measurement window around it. The core knows nothing about what the driver
+// does — replay, synthetic request generation, a batch submission, a query harness
+// (DESIGN.md §8; docs/GENERALIZATION.md G1).
 type Workload struct {
 	// +kubebuilder:validation:MinLength=1
-	Name       string     `json:"name"`
-	DatasetRef LocalRef   `json:"datasetRef"`
-	Replay     ReplaySpec `json:"replay"`
+	Name string `json:"name"`
+
+	// Driver names a Ready Plugin of kind loaddriver plus its config. The config is
+	// opaque to parallax and validated by the plugin's Describe() JSON Schema — a
+	// replay driver takes rate/distribution/abort here, a batch driver takes a job
+	// template, a query driver takes a scale factor.
+	Driver PluginRef `json:"driver"`
+
+	// DatasetRef names the corpus this workload replays or reads. Optional: drivers
+	// that generate load synthetically have no dataset.
+	// +optional
+	DatasetRef *LocalRef `json:"datasetRef,omitempty"`
+
+	// Completion selects what ends the measurement window (see CompletionMode).
+	// +optional
+	// +kubebuilder:validation:Enum=duration;driver
+	// +kubebuilder:default=duration
+	Completion string `json:"completion,omitempty"`
+
+	// Warmup runs the load unmeasured before t1 is stamped.
 	// +optional
 	Warmup metav1.Duration `json:"warmup,omitempty"`
+
+	// Measure is the measurement window for completion=duration. Ignored when
+	// completion=driver, where the driver decides and MaxDuration bounds it.
+	// Defaulted so an omitted window can never silently mean "measure nothing".
 	// +optional
+	// +kubebuilder:default="5m"
 	Measure metav1.Duration `json:"measure,omitempty"`
+
+	// MaxDuration caps the measurement window regardless of mode: a driver that
+	// never reports done, or a run that overshoots, aborts the trial rather than
+	// burning the study's wall-clock budget.
+	// +optional
+	MaxDuration metav1.Duration `json:"maxDuration,omitempty"`
+
+	// Cooldown quiesces the system after the window closes, before collection.
 	// +optional
 	Cooldown metav1.Duration `json:"cooldown,omitempty"`
 }
 
-// ReplaySpec mirrors CaptureLoadTest.spec field names (DESIGN.md §8, App. A.1).
-type ReplaySpec struct {
-	// +optional
-	Engine string   `json:"engine,omitempty"`
-	Rate   RateSpec `json:"rate"`
-	// +optional
-	Distribution DistributionSpec `json:"distribution,omitempty"`
-	// +optional
-	Abort AbortSpec `json:"abort,omitempty"`
-}
-
-type RateSpec struct {
-	// +kubebuilder:validation:Enum=Constant;OriginalTiming;Unlimited
-	Mode string `json:"mode"`
-	// +optional
-	RequestsPerSecond int64 `json:"requestsPerSecond,omitempty"`
-	// +optional
-	TimeScale DecimalString `json:"timeScale,omitempty"`
-}
-
-type DistributionSpec struct {
-	// +optional
-	Cells []string `json:"cells,omitempty"`
-	// +optional
-	WorkersPerSpoke int32 `json:"workersPerSpoke,omitempty"`
-	// +optional
-	ConcurrencyPerWorker int32 `json:"concurrencyPerWorker,omitempty"`
-}
-
-type AbortSpec struct {
-	// +optional
-	MaxDuration metav1.Duration `json:"maxDuration,omitempty"`
-	// +optional
-	ErrorPercent int32 `json:"errorPercent,omitempty"`
-}
-
-// SLISpec declares one service-level indicator and the provider that evaluates it.
+// SLISpec declares one service-level indicator and where its value comes from.
+// Exactly one of From/Driver/Derived must be set.
 type SLISpec struct {
 	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
-	// +kubebuilder:validation:MinLength=1
-	Provider string `json:"provider"`
-	// +optional
-	Query string `json:"query,omitempty"`
-	// +optional
-	Expr string `json:"expr,omitempty"`
+
 	// Trust class: fidelity | client | server | derived (§11).
 	// +optional
 	Class string `json:"class,omitempty"`
+
+	// From evaluates the SLI through a provider plugin. Config is the provider's own
+	// query dialect — `{query: <PromQL>}` for prometheus, whatever a third-party
+	// provider declares. The core treats it as opaque (docs/GENERALIZATION.md G6).
+	// +optional
+	From *PluginRef `json:"from,omitempty"`
+
+	// Driver reads a metric the workload's load driver reported when the run ended.
+	// The core already holds these (StopResponse.metrics), so no plugin round-trip is
+	// involved — and any driver's metric names work, not just an HTTP replay's.
+	// +optional
+	Driver *DriverMetric `json:"driver,omitempty"`
+
+	// Derived computes the SLI in-core from other SLIs of the same trial; no plugin
+	// is involved.
+	// +optional
+	Derived *DerivedSLI `json:"derived,omitempty"`
+}
+
+// DriverMetric names one key of the load driver's reported metrics map.
+type DriverMetric struct {
+	// +kubebuilder:validation:MinLength=1
+	Metric string `json:"metric"`
+}
+
+// DerivedSLI is an arithmetic expression over other SLI names in the same study.
+type DerivedSLI struct {
+	// +kubebuilder:validation:MinLength=1
+	Expr string `json:"expr"`
 }
 
 // Guardrail is a hard constraint; a breach disqualifies a config (DESIGN.md §8).
@@ -208,11 +253,10 @@ type Guardrail struct {
 	Min *DecimalString `json:"min,omitempty"`
 	// +optional
 	MaxRelativeToBaseline *DecimalString `json:"maxRelativeToBaseline,omitempty"`
-	// Inline provider query form (guardrail without a named SLI).
+	// From is the inline provider form: a guardrail evaluated directly, without a
+	// named SLI. Same shape as SLISpec.From.
 	// +optional
-	Provider string `json:"provider,omitempty"`
-	// +optional
-	Query string `json:"query,omitempty"`
+	From *PluginRef `json:"from,omitempty"`
 }
 
 type ObjectivesSpec struct {

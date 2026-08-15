@@ -178,12 +178,26 @@ func (r *StudyReconciler) materializeSweep(ctx context.Context, study *v1alpha1.
 		points = append(points, screeningPoint{configHash: space.CanonicalHash(a), assignments: a})
 	}
 
+	// Every config point screens against every workload: a config that wins under one
+	// load shape and loses under another is exactly what the study exists to surface.
+	// A study with no workloads still materializes its points (unit/dry-run paths).
+	total := 0
 	for _, p := range points {
-		if err := r.ensureTrial(ctx, study, p); err != nil {
-			return 0, err
+		if len(study.Spec.Workloads) == 0 {
+			if err := r.ensureTrial(ctx, study, p, -1); err != nil {
+				return 0, err
+			}
+			total++
+			continue
+		}
+		for i := range study.Spec.Workloads {
+			if err := r.ensureTrial(ctx, study, p, i); err != nil {
+				return 0, err
+			}
+			total++
 		}
 	}
-	return len(points), nil
+	return total, nil
 }
 
 // expandSweep produces the config assignments for the sweep using the study's strategy.
@@ -242,13 +256,15 @@ func parseStrategyConfig(raw *runtime.RawExtension) strategyConfig {
 	return c
 }
 
-// ensureTrial creates one screening Trial CR owned by the study, if it does not
-// already exist. Deterministic naming (by config hash) keeps it idempotent.
-func (r *StudyReconciler) ensureTrial(ctx context.Context, study *v1alpha1.Study, p screeningPoint) error {
+// ensureTrial creates one screening Trial CR for a (config point, workload) pair,
+// owned by the study, if it does not already exist. Deterministic naming (by config
+// hash and workload index) keeps it idempotent. A workloadIdx below zero means the
+// study declares no workloads.
+func (r *StudyReconciler) ensureTrial(ctx context.Context, study *v1alpha1.Study, p screeningPoint, workloadIdx int) error {
 	var workloadName string
 	var fidelity v1alpha1.FidelitySpec
-	if len(study.Spec.Workloads) > 0 {
-		w := study.Spec.Workloads[0]
+	if workloadIdx >= 0 && workloadIdx < len(study.Spec.Workloads) {
+		w := study.Spec.Workloads[workloadIdx]
 		workloadName = w.Name
 		fidelity = v1alpha1.FidelitySpec{Warmup: w.Warmup, Measure: w.Measure}
 	}
@@ -257,7 +273,12 @@ func (r *StudyReconciler) ensureTrial(ctx context.Context, study *v1alpha1.Study
 	if len(suffix) > 8 {
 		suffix = suffix[:8]
 	}
+	// The workload index (not its name) keeps the name bounded and DNS-safe; the
+	// readable name rides on the parallax.dev/workload label.
 	trialName := fmt.Sprintf("%s-screen-%s", study.Name, suffix)
+	if workloadIdx >= 0 {
+		trialName = fmt.Sprintf("%s-screen-w%d-%s", study.Name, workloadIdx, suffix)
+	}
 
 	var existing v1alpha1.Trial
 	err := r.Get(ctx, client.ObjectKey{Namespace: study.Namespace, Name: trialName}, &existing)
@@ -271,6 +292,9 @@ func (r *StudyReconciler) ensureTrial(ctx context.Context, study *v1alpha1.Study
 	labels := map[string]string{
 		"parallax.dev/study": study.Name,
 		"parallax.dev/mode":  string(v1alpha1.TrialModeScreening),
+	}
+	if workloadName != "" {
+		labels["parallax.dev/workload"] = workloadName
 	}
 	if p.isBaseline {
 		labels["parallax.dev/baseline"] = "true"

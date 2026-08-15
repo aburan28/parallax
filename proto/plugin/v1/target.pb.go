@@ -120,19 +120,93 @@ func (x *PrepareResponse) GetDetail() string {
 	return ""
 }
 
+// DimensionAssignment is one resolved axis of a config point, carrying the target
+// config location the study mapped it to (docs/GENERALIZATION.md G4).
+type DimensionAssignment struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Dimension name as written in the study's space block.
+	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	// Chosen value for this trial, rendered as a string.
+	Value string `protobuf:"bytes,2,opt,name=value,proto3" json:"value,omitempty"`
+	// Target config location: a Helm value path, a JSON pointer, a flag name. Defaults
+	// to name when the study omits it.
+	Path string `protobuf:"bytes,3,opt,name=path,proto3" json:"path,omitempty"`
+	// Richer target-defined mapping for axes a single path cannot express.
+	MappingJson   []byte `protobuf:"bytes,4,opt,name=mapping_json,json=mappingJson,proto3" json:"mapping_json,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DimensionAssignment) Reset() {
+	*x = DimensionAssignment{}
+	mi := &file_plugin_v1_target_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DimensionAssignment) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DimensionAssignment) ProtoMessage() {}
+
+func (x *DimensionAssignment) ProtoReflect() protoreflect.Message {
+	mi := &file_plugin_v1_target_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DimensionAssignment.ProtoReflect.Descriptor instead.
+func (*DimensionAssignment) Descriptor() ([]byte, []int) {
+	return file_plugin_v1_target_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *DimensionAssignment) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *DimensionAssignment) GetValue() string {
+	if x != nil {
+		return x.Value
+	}
+	return ""
+}
+
+func (x *DimensionAssignment) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+func (x *DimensionAssignment) GetMappingJson() []byte {
+	if x != nil {
+		return x.MappingJson
+	}
+	return nil
+}
+
 type ApplyRequest struct {
-	state      protoimpl.MessageState `protogen:"open.v1"`
-	ConfigHash string                 `protobuf:"bytes,1,opt,name=config_hash,json=configHash,proto3" json:"config_hash,omitempty"`
-	// Resolved dimension assignments (dimension path → value), e.g. agent.batchSize=512.
-	Dimensions    map[string]string `protobuf:"bytes,2,rep,name=dimensions,proto3" json:"dimensions,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	RawConfigJson []byte            `protobuf:"bytes,3,opt,name=raw_config_json,json=rawConfigJson,proto3" json:"raw_config_json,omitempty"`
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ConfigHash    string                 `protobuf:"bytes,1,opt,name=config_hash,json=configHash,proto3" json:"config_hash,omitempty"`
+	Assignments   []*DimensionAssignment `protobuf:"bytes,2,rep,name=assignments,proto3" json:"assignments,omitempty"`
+	RawConfigJson []byte                 `protobuf:"bytes,3,opt,name=raw_config_json,json=rawConfigJson,proto3" json:"raw_config_json,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ApplyRequest) Reset() {
 	*x = ApplyRequest{}
-	mi := &file_plugin_v1_target_proto_msgTypes[2]
+	mi := &file_plugin_v1_target_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -144,7 +218,7 @@ func (x *ApplyRequest) String() string {
 func (*ApplyRequest) ProtoMessage() {}
 
 func (x *ApplyRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_plugin_v1_target_proto_msgTypes[2]
+	mi := &file_plugin_v1_target_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -157,7 +231,7 @@ func (x *ApplyRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ApplyRequest.ProtoReflect.Descriptor instead.
 func (*ApplyRequest) Descriptor() ([]byte, []int) {
-	return file_plugin_v1_target_proto_rawDescGZIP(), []int{2}
+	return file_plugin_v1_target_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *ApplyRequest) GetConfigHash() string {
@@ -167,9 +241,9 @@ func (x *ApplyRequest) GetConfigHash() string {
 	return ""
 }
 
-func (x *ApplyRequest) GetDimensions() map[string]string {
+func (x *ApplyRequest) GetAssignments() []*DimensionAssignment {
 	if x != nil {
-		return x.Dimensions
+		return x.Assignments
 	}
 	return nil
 }
@@ -193,7 +267,7 @@ type ApplyResponse struct {
 
 func (x *ApplyResponse) Reset() {
 	*x = ApplyResponse{}
-	mi := &file_plugin_v1_target_proto_msgTypes[3]
+	mi := &file_plugin_v1_target_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -205,7 +279,7 @@ func (x *ApplyResponse) String() string {
 func (*ApplyResponse) ProtoMessage() {}
 
 func (x *ApplyResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_plugin_v1_target_proto_msgTypes[3]
+	mi := &file_plugin_v1_target_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -218,7 +292,7 @@ func (x *ApplyResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ApplyResponse.ProtoReflect.Descriptor instead.
 func (*ApplyResponse) Descriptor() ([]byte, []int) {
-	return file_plugin_v1_target_proto_rawDescGZIP(), []int{3}
+	return file_plugin_v1_target_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *ApplyResponse) GetApplied() bool {
@@ -252,7 +326,7 @@ type ReadyRequest struct {
 
 func (x *ReadyRequest) Reset() {
 	*x = ReadyRequest{}
-	mi := &file_plugin_v1_target_proto_msgTypes[4]
+	mi := &file_plugin_v1_target_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -264,7 +338,7 @@ func (x *ReadyRequest) String() string {
 func (*ReadyRequest) ProtoMessage() {}
 
 func (x *ReadyRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_plugin_v1_target_proto_msgTypes[4]
+	mi := &file_plugin_v1_target_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -277,7 +351,7 @@ func (x *ReadyRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReadyRequest.ProtoReflect.Descriptor instead.
 func (*ReadyRequest) Descriptor() ([]byte, []int) {
-	return file_plugin_v1_target_proto_rawDescGZIP(), []int{4}
+	return file_plugin_v1_target_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *ReadyRequest) GetConfigHash() string {
@@ -304,7 +378,7 @@ type ReadyResponse struct {
 
 func (x *ReadyResponse) Reset() {
 	*x = ReadyResponse{}
-	mi := &file_plugin_v1_target_proto_msgTypes[5]
+	mi := &file_plugin_v1_target_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -316,7 +390,7 @@ func (x *ReadyResponse) String() string {
 func (*ReadyResponse) ProtoMessage() {}
 
 func (x *ReadyResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_plugin_v1_target_proto_msgTypes[5]
+	mi := &file_plugin_v1_target_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -329,7 +403,7 @@ func (x *ReadyResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReadyResponse.ProtoReflect.Descriptor instead.
 func (*ReadyResponse) Descriptor() ([]byte, []int) {
-	return file_plugin_v1_target_proto_rawDescGZIP(), []int{5}
+	return file_plugin_v1_target_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *ReadyResponse) GetReady() bool {
@@ -357,7 +431,7 @@ type ResetRequest struct {
 
 func (x *ResetRequest) Reset() {
 	*x = ResetRequest{}
-	mi := &file_plugin_v1_target_proto_msgTypes[6]
+	mi := &file_plugin_v1_target_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -369,7 +443,7 @@ func (x *ResetRequest) String() string {
 func (*ResetRequest) ProtoMessage() {}
 
 func (x *ResetRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_plugin_v1_target_proto_msgTypes[6]
+	mi := &file_plugin_v1_target_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -382,7 +456,7 @@ func (x *ResetRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResetRequest.ProtoReflect.Descriptor instead.
 func (*ResetRequest) Descriptor() ([]byte, []int) {
-	return file_plugin_v1_target_proto_rawDescGZIP(), []int{6}
+	return file_plugin_v1_target_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *ResetRequest) GetConfigHash() string {
@@ -409,7 +483,7 @@ type ResetResponse struct {
 
 func (x *ResetResponse) Reset() {
 	*x = ResetResponse{}
-	mi := &file_plugin_v1_target_proto_msgTypes[7]
+	mi := &file_plugin_v1_target_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -421,7 +495,7 @@ func (x *ResetResponse) String() string {
 func (*ResetResponse) ProtoMessage() {}
 
 func (x *ResetResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_plugin_v1_target_proto_msgTypes[7]
+	mi := &file_plugin_v1_target_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -434,7 +508,7 @@ func (x *ResetResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResetResponse.ProtoReflect.Descriptor instead.
 func (*ResetResponse) Descriptor() ([]byte, []int) {
-	return file_plugin_v1_target_proto_rawDescGZIP(), []int{7}
+	return file_plugin_v1_target_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *ResetResponse) GetOk() bool {
@@ -452,15 +526,16 @@ func (x *ResetResponse) GetDetail() string {
 }
 
 type ContractRequest struct {
-	state          protoimpl.MessageState `protogen:"open.v1"`
-	DimensionNames []string               `protobuf:"bytes,1,rep,name=dimension_names,json=dimensionNames,proto3" json:"dimension_names,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The study's declared axes (values unset — this is an admission-time check).
+	Dimensions    []*DimensionAssignment `protobuf:"bytes,1,rep,name=dimensions,proto3" json:"dimensions,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ContractRequest) Reset() {
 	*x = ContractRequest{}
-	mi := &file_plugin_v1_target_proto_msgTypes[8]
+	mi := &file_plugin_v1_target_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -472,7 +547,7 @@ func (x *ContractRequest) String() string {
 func (*ContractRequest) ProtoMessage() {}
 
 func (x *ContractRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_plugin_v1_target_proto_msgTypes[8]
+	mi := &file_plugin_v1_target_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -485,12 +560,12 @@ func (x *ContractRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ContractRequest.ProtoReflect.Descriptor instead.
 func (*ContractRequest) Descriptor() ([]byte, []int) {
-	return file_plugin_v1_target_proto_rawDescGZIP(), []int{8}
+	return file_plugin_v1_target_proto_rawDescGZIP(), []int{9}
 }
 
-func (x *ContractRequest) GetDimensionNames() []string {
+func (x *ContractRequest) GetDimensions() []*DimensionAssignment {
 	if x != nil {
-		return x.DimensionNames
+		return x.Dimensions
 	}
 	return nil
 }
@@ -507,7 +582,7 @@ type ContractResponse struct {
 
 func (x *ContractResponse) Reset() {
 	*x = ContractResponse{}
-	mi := &file_plugin_v1_target_proto_msgTypes[9]
+	mi := &file_plugin_v1_target_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -519,7 +594,7 @@ func (x *ContractResponse) String() string {
 func (*ContractResponse) ProtoMessage() {}
 
 func (x *ContractResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_plugin_v1_target_proto_msgTypes[9]
+	mi := &file_plugin_v1_target_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -532,7 +607,7 @@ func (x *ContractResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ContractResponse.ProtoReflect.Descriptor instead.
 func (*ContractResponse) Descriptor() ([]byte, []int) {
-	return file_plugin_v1_target_proto_rawDescGZIP(), []int{9}
+	return file_plugin_v1_target_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *ContractResponse) GetOk() bool {
@@ -566,17 +641,17 @@ const file_plugin_v1_target_proto_rawDesc = "" +
 	"configJson\"?\n" +
 	"\x0fPrepareResponse\x12\x14\n" +
 	"\x05ready\x18\x01 \x01(\bR\x05ready\x12\x16\n" +
-	"\x06detail\x18\x02 \x01(\tR\x06detail\"\xe8\x01\n" +
+	"\x06detail\x18\x02 \x01(\tR\x06detail\"v\n" +
+	"\x13DimensionAssignment\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value\x12\x12\n" +
+	"\x04path\x18\x03 \x01(\tR\x04path\x12!\n" +
+	"\fmapping_json\x18\x04 \x01(\fR\vmappingJson\"\xa2\x01\n" +
 	"\fApplyRequest\x12\x1f\n" +
 	"\vconfig_hash\x18\x01 \x01(\tR\n" +
-	"configHash\x12P\n" +
-	"\n" +
-	"dimensions\x18\x02 \x03(\v20.parallax.plugin.v1.ApplyRequest.DimensionsEntryR\n" +
-	"dimensions\x12&\n" +
-	"\x0fraw_config_json\x18\x03 \x01(\fR\rrawConfigJson\x1a=\n" +
-	"\x0fDimensionsEntry\x12\x10\n" +
-	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"i\n" +
+	"configHash\x12I\n" +
+	"\vassignments\x18\x02 \x03(\v2'.parallax.plugin.v1.DimensionAssignmentR\vassignments\x12&\n" +
+	"\x0fraw_config_json\x18\x03 \x01(\fR\rrawConfigJson\"i\n" +
 	"\rApplyResponse\x12\x18\n" +
 	"\aapplied\x18\x01 \x01(\bR\aapplied\x12\x16\n" +
 	"\x06detail\x18\x02 \x01(\tR\x06detail\x12&\n" +
@@ -595,9 +670,11 @@ const file_plugin_v1_target_proto_rawDesc = "" +
 	"cold_start\x18\x02 \x01(\bR\tcoldStart\"7\n" +
 	"\rResetResponse\x12\x0e\n" +
 	"\x02ok\x18\x01 \x01(\bR\x02ok\x12\x16\n" +
-	"\x06detail\x18\x02 \x01(\tR\x06detail\":\n" +
-	"\x0fContractRequest\x12'\n" +
-	"\x0fdimension_names\x18\x01 \x03(\tR\x0edimensionNames\"z\n" +
+	"\x06detail\x18\x02 \x01(\tR\x06detail\"Z\n" +
+	"\x0fContractRequest\x12G\n" +
+	"\n" +
+	"dimensions\x18\x01 \x03(\v2'.parallax.plugin.v1.DimensionAssignmentR\n" +
+	"dimensions\"z\n" +
 	"\x10ContractResponse\x12\x0e\n" +
 	"\x02ok\x18\x01 \x01(\bR\x02ok\x12-\n" +
 	"\x12unknown_dimensions\x18\x02 \x03(\tR\x11unknownDimensions\x12'\n" +
@@ -623,35 +700,36 @@ func file_plugin_v1_target_proto_rawDescGZIP() []byte {
 
 var file_plugin_v1_target_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
 var file_plugin_v1_target_proto_goTypes = []any{
-	(*PrepareRequest)(nil),   // 0: parallax.plugin.v1.PrepareRequest
-	(*PrepareResponse)(nil),  // 1: parallax.plugin.v1.PrepareResponse
-	(*ApplyRequest)(nil),     // 2: parallax.plugin.v1.ApplyRequest
-	(*ApplyResponse)(nil),    // 3: parallax.plugin.v1.ApplyResponse
-	(*ReadyRequest)(nil),     // 4: parallax.plugin.v1.ReadyRequest
-	(*ReadyResponse)(nil),    // 5: parallax.plugin.v1.ReadyResponse
-	(*ResetRequest)(nil),     // 6: parallax.plugin.v1.ResetRequest
-	(*ResetResponse)(nil),    // 7: parallax.plugin.v1.ResetResponse
-	(*ContractRequest)(nil),  // 8: parallax.plugin.v1.ContractRequest
-	(*ContractResponse)(nil), // 9: parallax.plugin.v1.ContractResponse
-	nil,                      // 10: parallax.plugin.v1.ApplyRequest.DimensionsEntry
+	(*PrepareRequest)(nil),      // 0: parallax.plugin.v1.PrepareRequest
+	(*PrepareResponse)(nil),     // 1: parallax.plugin.v1.PrepareResponse
+	(*DimensionAssignment)(nil), // 2: parallax.plugin.v1.DimensionAssignment
+	(*ApplyRequest)(nil),        // 3: parallax.plugin.v1.ApplyRequest
+	(*ApplyResponse)(nil),       // 4: parallax.plugin.v1.ApplyResponse
+	(*ReadyRequest)(nil),        // 5: parallax.plugin.v1.ReadyRequest
+	(*ReadyResponse)(nil),       // 6: parallax.plugin.v1.ReadyResponse
+	(*ResetRequest)(nil),        // 7: parallax.plugin.v1.ResetRequest
+	(*ResetResponse)(nil),       // 8: parallax.plugin.v1.ResetResponse
+	(*ContractRequest)(nil),     // 9: parallax.plugin.v1.ContractRequest
+	(*ContractResponse)(nil),    // 10: parallax.plugin.v1.ContractResponse
 }
 var file_plugin_v1_target_proto_depIdxs = []int32{
-	10, // 0: parallax.plugin.v1.ApplyRequest.dimensions:type_name -> parallax.plugin.v1.ApplyRequest.DimensionsEntry
-	0,  // 1: parallax.plugin.v1.Target.Prepare:input_type -> parallax.plugin.v1.PrepareRequest
-	2,  // 2: parallax.plugin.v1.Target.Apply:input_type -> parallax.plugin.v1.ApplyRequest
-	4,  // 3: parallax.plugin.v1.Target.Ready:input_type -> parallax.plugin.v1.ReadyRequest
-	6,  // 4: parallax.plugin.v1.Target.Reset:input_type -> parallax.plugin.v1.ResetRequest
-	8,  // 5: parallax.plugin.v1.Target.Contract:input_type -> parallax.plugin.v1.ContractRequest
-	1,  // 6: parallax.plugin.v1.Target.Prepare:output_type -> parallax.plugin.v1.PrepareResponse
-	3,  // 7: parallax.plugin.v1.Target.Apply:output_type -> parallax.plugin.v1.ApplyResponse
-	5,  // 8: parallax.plugin.v1.Target.Ready:output_type -> parallax.plugin.v1.ReadyResponse
-	7,  // 9: parallax.plugin.v1.Target.Reset:output_type -> parallax.plugin.v1.ResetResponse
-	9,  // 10: parallax.plugin.v1.Target.Contract:output_type -> parallax.plugin.v1.ContractResponse
-	6,  // [6:11] is the sub-list for method output_type
-	1,  // [1:6] is the sub-list for method input_type
-	1,  // [1:1] is the sub-list for extension type_name
-	1,  // [1:1] is the sub-list for extension extendee
-	0,  // [0:1] is the sub-list for field type_name
+	2,  // 0: parallax.plugin.v1.ApplyRequest.assignments:type_name -> parallax.plugin.v1.DimensionAssignment
+	2,  // 1: parallax.plugin.v1.ContractRequest.dimensions:type_name -> parallax.plugin.v1.DimensionAssignment
+	0,  // 2: parallax.plugin.v1.Target.Prepare:input_type -> parallax.plugin.v1.PrepareRequest
+	3,  // 3: parallax.plugin.v1.Target.Apply:input_type -> parallax.plugin.v1.ApplyRequest
+	5,  // 4: parallax.plugin.v1.Target.Ready:input_type -> parallax.plugin.v1.ReadyRequest
+	7,  // 5: parallax.plugin.v1.Target.Reset:input_type -> parallax.plugin.v1.ResetRequest
+	9,  // 6: parallax.plugin.v1.Target.Contract:input_type -> parallax.plugin.v1.ContractRequest
+	1,  // 7: parallax.plugin.v1.Target.Prepare:output_type -> parallax.plugin.v1.PrepareResponse
+	4,  // 8: parallax.plugin.v1.Target.Apply:output_type -> parallax.plugin.v1.ApplyResponse
+	6,  // 9: parallax.plugin.v1.Target.Ready:output_type -> parallax.plugin.v1.ReadyResponse
+	8,  // 10: parallax.plugin.v1.Target.Reset:output_type -> parallax.plugin.v1.ResetResponse
+	10, // 11: parallax.plugin.v1.Target.Contract:output_type -> parallax.plugin.v1.ContractResponse
+	7,  // [7:12] is the sub-list for method output_type
+	2,  // [2:7] is the sub-list for method input_type
+	2,  // [2:2] is the sub-list for extension type_name
+	2,  // [2:2] is the sub-list for extension extendee
+	0,  // [0:2] is the sub-list for field type_name
 }
 
 func init() { file_plugin_v1_target_proto_init() }

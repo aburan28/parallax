@@ -10,4 +10,5 @@ resources:
   - parallax.dev_v1alpha1_dataset.yaml
   - parallax.dev_v1alpha1_study_capture-agent-throughput.yaml
   - parallax.dev_v1alpha1_study_checkout-latency-bakeoff.yaml
+  - parallax.dev_v1alpha1_study_nightly-etl-runtime.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples

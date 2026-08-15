@@ -41,56 +41,85 @@ spec:
   workloads:
     - name: steady-2k
       datasetRef: { name: prod-edge-2026-07-14 }
-      replay:
-        engine: builtin
-        rate: { mode: Constant, requestsPerSecond: 2000 }
-        distribution: { cells: [bench-a], workersPerSpoke: 2, concurrencyPerWorker: 25 }
-        abort: { maxDuration: 10m, errorPercent: 10 }
+      # The driver plugin owns the replay vocabulary; parallax passes this block
+      # through untouched (docs/GENERALIZATION.md G1).
+      driver:
+        plugin: loaddriver-kapture
+        config:
+          engine: builtin
+          rate: { mode: Constant, requestsPerSecond: 2000 }
+          distribution: { cells: [bench-a], workersPerSpoke: 2, concurrencyPerWorker: 25 }
+          abort: { maxDuration: 10m, errorPercent: 10 }
+      completion: duration          # continuous replay; the study closes the window
       warmup: 2m
       measure: 5m
+      maxDuration: 10m
       cooldown: 30s
 
   slis:
     - name: capture_loss_ratio
-      provider: readback
+      class: fidelity
+      from: { plugin: readback }
     - name: capture_drop_ratio
-      provider: prometheus
-      query: |
-        sum(rate(capture_agent_requests_dropped_total[{{.Window}}]))
-          / sum(rate(capture_agent_requests_total[{{.Window}}]))
+      class: server
+      from:
+        plugin: prometheus
+        config:
+          query: |
+            sum(rate(capture_agent_requests_dropped_total[{{.Window}}]))
+              / sum(rate(capture_agent_requests_total[{{.Window}}]))
     - name: queue_saturation_peak
-      provider: prometheus
-      query: |
-        max_over_time((capture_agent_write_queue_depth
-          / capture_agent_write_queue_capacity)[{{.Window}}:15s])
-    - name: replay_error_ratio
-      provider: runreport
-      expr: failedRequests / sentRequests
+      class: server
+      from:
+        plugin: prometheus
+        config:
+          query: |
+            max_over_time((capture_agent_write_queue_depth
+              / capture_agent_write_queue_capacity)[{{.Window}}:15s])
+    # Client-side truth comes straight from the load driver's reported metrics —
+    # no provider plugin in the path (docs/GENERALIZATION.md G5).
+    - name: replay_failed_requests
+      class: client
+      driver: { metric: failed_requests }
+    - name: replay_sent_requests
+      class: client
+      driver: { metric: sent_requests }
     - name: client_p99_ms
-      provider: runreport
-      expr: p99LatencyMs
+      class: client
+      driver: { metric: p99_latency_ms }
+    - name: replay_error_ratio
+      class: derived
+      derived: { expr: replay_failed_requests / replay_sent_requests }
     - name: agent_cpu_cores
-      provider: prometheus
-      query: |
-        sum(rate(container_cpu_usage_seconds_total{pod=~"capture-agent-.*"}[{{.Window}}]))
+      class: server
+      from:
+        plugin: prometheus
+        config:
+          query: |
+            sum(rate(container_cpu_usage_seconds_total{pod=~"capture-agent-.*"}[{{.Window}}]))
     - name: capture_throughput_rps
-      provider: prometheus
-      query: |
-        sum(rate(capture_agent_requests_total[{{.Window}}]))
+      class: server
+      from:
+        plugin: prometheus
+        config:
+          query: |
+            sum(rate(capture_agent_requests_total[{{.Window}}]))
     - name: cpu_seconds_per_1k_captured
-      provider: derived
-      expr: agent_cpu_cores * 1000 / capture_throughput_rps
+      class: derived
+      derived: { expr: agent_cpu_cores * 1000 / capture_throughput_rps }
 
   guardrails:
     - { sli: capture_loss_ratio, max: 0.0 }
     - { sli: capture_drop_ratio, max: 0.0 }
     - { sli: replay_error_ratio, max: 0.001 }
     - { sli: client_p99_ms, maxRelativeToBaseline: 1.05 }
-    - provider: prometheus
-      query: 'sum(increase(capture_agent_storage_write_errors_total[{{.Window}}]))'
+    - from:
+        plugin: prometheus
+        config: { query: 'sum(increase(capture_agent_storage_write_errors_total[{{.Window}}]))' }
       max: 0
-    - provider: prometheus
-      query: 'sum(increase(kube_pod_container_status_restarts_total{namespace="capture-system"}[{{.Window}}]))'
+    - from:
+        plugin: prometheus
+        config: { query: 'sum(increase(kube_pod_container_status_restarts_total{namespace="capture-system"}[{{.Window}}]))' }
       max: 0
 
   objectives:

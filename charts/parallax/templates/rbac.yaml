@@ -67,7 +67,32 @@ rules:
   # reached via a clusterRef kubeconfig; in --local they are co-located, so the
   # rules must exist here. No other controller uses anything below this line.
   # ==================================================================
-  # kapture load-generation CRs (the load path — DESIGN.md §16, Appendix A.1).
+  # Generic SUT surface: any target plugin needs to observe a rollout and read
+  # pod state to gate health, whatever the SUT is.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets"]
+    verbs: ["get", "list", "watch"]
+
+  # ==================================================================
+  # PLUGIN-SUPPLIED RULES.
+  # Plugins run as subprocesses of the manager, so they act with this
+  # ServiceAccount — which means a plugin's permissions can only come from
+  # here (docs/GENERALIZATION.md G8). Vendor-specific rules are therefore
+  # opt-in: a default install grants no third-party API group. Enable the
+  # bundle a plugin needs, or add your own under rbac.extraRules.
+  #
+  # TODO(m2): let a Plugin CR declare spec.rbac.rules and have the Plugin
+  # controller reconcile a per-plugin ClusterRole, so this list stops being
+  # the core chart's business.
+  # ==================================================================
+{{- if .Values.rbac.plugins.kapture }}
+  # kapture load generation (loaddriver-kapture, target-kapture) — DESIGN.md §16, App. A.1.
   - apiGroups: ["capture.gateway.io"]
     resources:
       - captureloadtests
@@ -79,20 +104,16 @@ rules:
       - captureloadtests/status
       - trafficreplays/status
     verbs: ["get"]
-  # Direct-mode engine Jobs and the SUT health gate (Pods).
+{{- end }}
+{{- if .Values.rbac.plugins.jobs }}
+  # Job-running drivers (loaddriver-batchjob, direct-mode replay engines).
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["get", "list", "watch", "create", "delete"]
-  - apiGroups: [""]
-    resources: ["pods"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: [""]
-    resources: ["pods/log"]
-    verbs: ["get"]
-  # SUT rollout gate for direct/integrated target modes.
-  - apiGroups: ["apps"]
-    resources: ["deployments", "statefulsets"]
-    verbs: ["get", "list", "watch"]
+{{- end }}
+{{- with .Values.rbac.extraRules }}
+{{- toYaml . | nindent 2 }}
+{{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

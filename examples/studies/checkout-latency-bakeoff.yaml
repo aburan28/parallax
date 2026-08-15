@@ -44,42 +44,59 @@ spec:
   workloads:
     - name: prod-shape-1x
       datasetRef: { name: shop-checkout-2026-07-10 }
-      replay:
-        engine: builtin
-        rate: { mode: OriginalTiming, timeScale: "1.0" }   # recorded burstiness
-        distribution: { cells: [bench-a] }
-        abort: { maxDuration: 12m, errorPercent: 5 }
+      driver:
+        plugin: loaddriver-kapture
+        config:
+          engine: builtin
+          rate: { mode: OriginalTiming, timeScale: "1.0" }   # recorded burstiness
+          distribution: { cells: [bench-a] }
+          abort: { maxDuration: 12m, errorPercent: 5 }
+      completion: duration
       warmup: 2m
       measure: 8m
+      maxDuration: 12m
       cooldown: 30s
 
   slis:
     - name: client_p99_ms
-      provider: runreport
-      expr: p99LatencyMs
+      class: client
+      driver: { metric: p99_latency_ms }
     - name: client_p50_ms
-      provider: runreport
-      expr: p50LatencyMs
+      class: client
+      driver: { metric: p50_latency_ms }
+    - name: failed_requests
+      class: client
+      driver: { metric: failed_requests }
+    - name: sent_requests
+      class: client
+      driver: { metric: sent_requests }
     - name: replay_error_ratio
-      provider: runreport
-      expr: failedRequests / sentRequests
+      class: derived
+      derived: { expr: failed_requests / sent_requests }
     - name: sut_cpu_cores
-      provider: prometheus
-      query: |
-        sum(rate(container_cpu_usage_seconds_total{namespace="shop",pod=~"checkout-.*"}[{{.Window}}]))
+      class: server
+      from:
+        plugin: prometheus
+        config:
+          query: |
+            sum(rate(container_cpu_usage_seconds_total{namespace="shop",pod=~"checkout-.*"}[{{.Window}}]))
     - name: sut_mem_peak_bytes
-      provider: prometheus
-      query: |
-        max_over_time(sum(container_memory_working_set_bytes{namespace="shop",pod=~"checkout-.*"})[{{.Window}}:15s])
+      class: server
+      from:
+        plugin: prometheus
+        config:
+          query: |
+            max_over_time(sum(container_memory_working_set_bytes{namespace="shop",pod=~"checkout-.*"})[{{.Window}}:15s])
     - name: cost_score
-      provider: derived
-      expr: sut_cpu_cores + sut_mem_peak_bytes / 4e9   # 1 core ≈ 4GiB pricing ratio
+      class: derived
+      derived: { expr: sut_cpu_cores + sut_mem_peak_bytes / 4e9 }   # 1 core ≈ 4GiB
 
   guardrails:
     - { sli: replay_error_ratio, max: 0.001 }
     - { sli: client_p50_ms, maxRelativeToBaseline: 1.10 }
-    - provider: prometheus
-      query: 'sum(increase(kube_pod_container_status_restarts_total{namespace="shop"}[{{.Window}}]))'
+    - from:
+        plugin: prometheus
+        config: { query: 'sum(increase(kube_pod_container_status_restarts_total{namespace="shop"}[{{.Window}}]))' }
       max: 0
 
   objectives:

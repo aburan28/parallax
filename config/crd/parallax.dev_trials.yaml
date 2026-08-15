@@ -73,14 +73,19 @@ spec:
                 type: object
               fidelity:
                 description: |-
-                  FidelitySpec is the duration/rate/rep dial that separates screening from
-                  validation trials (DESIGN.md §7 fidelity note).
+                  FidelitySpec is the dial that separates cheap screening trials from expensive
+                  validation trials (DESIGN.md §7 fidelity note). Durations are core semantics;
+                  intensity is driver-specific, so it rides along as a config overlay.
                 properties:
+                  driverConfig:
+                    description: |-
+                      DriverConfig overlays the workload's driver config for this trial — a lower
+                      request rate, a smaller scale factor, fewer client threads. Merged over
+                      Workload.Driver.Config; driver-defined, opaque to the core.
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
                   measure:
                     type: string
-                  replayRate:
-                    format: int64
-                    type: integer
                   warmup:
                     type: string
                 type: object
@@ -185,6 +190,29 @@ spec:
                     format: int32
                     type: integer
                 type: object
+              load:
+                description: LoadRunStatus is the observed state of the trial's load-driver
+                  run.
+                properties:
+                  abortReason:
+                    type: string
+                  aborted:
+                    description: Aborted records that the driver's own abort policy
+                      fired.
+                    type: boolean
+                  metrics:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      Metrics are the driver's summary metrics from Stop, as decimal strings (CRD
+                      float avoidance). SLIs with a `driver` source read from this map.
+                    type: object
+                  runRef:
+                    description: |-
+                      RunRef is the opaque handle the driver returned from Start; the core hands it
+                      back on every Progress/Stop call and never assumes its shape.
+                    type: string
+                type: object
               observedGeneration:
                 format: int64
                 type: integer
@@ -227,6 +255,12 @@ spec:
                     format: date-time
                     type: string
                   drained:
+                    format: date-time
+                    type: string
+                  loadStarted:
+                    description: |-
+                      LoadStarted is when the load driver's run began. Warmup is measured from here,
+                      not from Ready, so a slow driver start does not eat the warmup.
                     format: date-time
                     type: string
                   ready:

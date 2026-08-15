@@ -1,0 +1,133 @@
+# Workload-agnostic study: tune a batch ETL job. Nothing here is request/response
+# shaped — there is no traffic, no replay, no rate, no latency percentile, and no
+# kapture object anywhere in the path.
+#
+# The two pieces that make it work (docs/GENERALIZATION.md §4):
+#   * `completion: driver` — the job's own runtime IS the measurement. The driver
+#     reports done and the core closes the window; no fixed `measure` applies.
+#   * `slis[].driver` — SLIs read the driver's own metric names (records_processed,
+#     job_duration_ms), which the core never interprets.
+#
+# See docs/DESIGN.md §8.
+apiVersion: parallax.dev/v1alpha1
+kind: Study
+metadata:
+  name: nightly-etl-runtime
+  namespace: data-bench
+spec:
+  target:
+    plugin: target-helm
+    config:
+      chart: charts/etl-runner
+      release: etl
+      namespace: data
+      readiness:
+        prometheus: 'sum(up{job="etl-runner"}) >= 1'
+
+  baseline:
+    name: prod-current
+    values:
+      spark: { executors: 8, executorMemory: 4g, shufflePartitions: 200 }
+
+  space:
+    dimensions:
+      - name: executors
+        path: .spark.executors             # explicit target config path
+        int: { min: 4, max: 24 }
+      - name: executorMemory
+        path: .spark.executorMemory
+        categorical: { values: [2g, 4g, 8g, 16g] }
+      - name: shufflePartitions
+        path: .spark.shufflePartitions
+        int: { min: 100, max: 1600, log: true }
+      - name: compression
+        path: .output.codec
+        categorical: { values: [none, snappy, zstd] }
+    constraints:
+      # Keep total cluster memory inside the pool the bench namespace is given.
+      - "executors * int(executorMemory.replace('g','')) <= 96"
+    strategy:
+      plugin: strategy-sobol
+      config: { points: 48, seed: 7 }
+
+  workloads:
+    - name: one-nights-partitions
+      # An object-storage corpus: no capture, no TrafficCapture CR.
+      datasetRef: { name: events-2026-07-14 }
+      driver:
+        plugin: loaddriver-batchjob
+        config:
+          jobTemplate: etl-runner/templates/job.yaml
+          args: ["--input-prefix", "s3://data-bench/events/2026-07-14/", "--partitions", "512"]
+          parallelism: 4
+      # The job runs to completion; its runtime is the thing being measured.
+      completion: driver
+      # A job that hangs must not burn the study's wall-clock budget.
+      maxDuration: 90m
+      cooldown: 1m
+
+  slis:
+    # Straight from the driver — these are the batch driver's published metric names.
+    - name: job_duration_ms
+      class: client
+      driver: { metric: job_duration_ms }
+    - name: records_processed
+      class: client
+      driver: { metric: records_processed }
+    - name: records_failed
+      class: client
+      driver: { metric: records_failed }
+    - name: bytes_written
+      class: client
+      driver: { metric: bytes_written }
+
+    # Server-side cost over the same window, from any PromQL-compatible backend.
+    - name: cpu_core_seconds
+      class: server
+      from:
+        plugin: prometheus
+        config:
+          query: |
+            sum(increase(container_cpu_usage_seconds_total{namespace="data",pod=~"etl-.*"}[{{.Window}}]))
+    - name: mem_peak_bytes
+      class: server
+      from:
+        plugin: prometheus
+        config:
+          query: |
+            max_over_time(sum(container_memory_working_set_bytes{namespace="data",pod=~"etl-.*"})[{{.Window}}:30s])
+
+    - name: failure_ratio
+      class: derived
+      derived: { expr: records_failed / records_processed }
+    - name: core_seconds_per_million_records
+      class: derived
+      derived: { expr: cpu_core_seconds * 1e6 / records_processed }
+
+  guardrails:
+    - { sli: failure_ratio, max: 0.0 }
+    - { sli: records_processed, min: 1 }
+    - { sli: job_duration_ms, maxRelativeToBaseline: 1.20 }
+    - from:
+        plugin: prometheus
+        config: { query: 'sum(increase(kube_pod_container_status_restarts_total{namespace="data"}[{{.Window}}]))' }
+      max: 0
+
+  objectives:
+    primary:   { sli: job_duration_ms, direction: minimize, minPracticalEffect: "5%" }
+    secondary:
+      - { sli: core_seconds_per_million_records, direction: minimize }
+
+  selection: { topK: 3, method: pareto-weighted }
+
+  validation:
+    reps: 5
+    alpha: 0.05
+    correction: holm
+
+  budgets: { maxTrials: 60, maxClusterTime: 40h, maxWallClock: 72h }
+
+  promotion:
+    approval: manual
+    output: golden/etl-runner-values.yaml
+    require: [validation.pass]

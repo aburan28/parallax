@@ -48,15 +48,10 @@ rules:
     verbs: ["get", "list", "watch"]
 
   # ==== TRIAL CONTROLLER ONLY — benchmark-cluster surface ====
-  - apiGroups: ["capture.gateway.io"]
-    resources: ["captureloadtests", "trafficreplays", "trafficcaptures"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: ["capture.gateway.io"]
-    resources: ["captureloadtests/status", "trafficreplays/status"]
-    verbs: ["get"]
-  - apiGroups: ["batch"]
-    resources: ["jobs"]
-    verbs: ["get", "list", "watch", "create", "delete"]
+  # Generic SUT surface only. Rules a *plugin* needs (kapture CRs, Jobs, any
+  # third-party API group) are opt-in overlays, not base policy: plugins act with
+  # this ServiceAccount, so a default install must not carry a vendor's API group
+  # (docs/GENERALIZATION.md G8). See plugin-rules/.
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "watch"]

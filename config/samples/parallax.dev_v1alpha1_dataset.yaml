@@ -1,15 +1,18 @@
-# Sample Dataset CR: a registered, verified captured-traffic workload.
-# Fields match api/v1alpha1 DatasetSpec (captureRef/storageRef are same-namespace
-# LocalRefs; preshard.shards drives kapture-preshard partitioning).
+# Example Dataset registration: a captured-traffic corpus.
+#
+# `source.kind` discriminates where a corpus comes from — kapture-capture is one
+# kind among object-storage, git and generator, not the only shape a dataset can
+# take (docs/GENERALIZATION.md G2). See docs/DESIGN.md §10.
 apiVersion: parallax.dev/v1alpha1
 kind: Dataset
 metadata:
   name: prod-edge-2026-07-14
   namespace: bench
 spec:
-  captureRef:
-    name: checkout-capture
-  storageRef:
-    name: kapture-bench-storage
-  preshard:
-    shards: 8
+  source:
+    kind: kapture-capture
+    ref: { name: checkout-capture }
+    config:
+      namespace: edge
+  storageRef: { name: bench-dataset-store }
+  preshard: { shards: 8 }   # produced by `parallax datasets preshard` (kapture-preshard)
