@@ -92,6 +92,20 @@ spec:
                   description: Guardrail is a hard constraint; a breach disqualifies
                     a config (DESIGN.md §8).
                   properties:
+                    from:
+                      description: |-
+                        From is the inline provider form: a guardrail evaluated directly, without a
+                        named SLI. Same shape as SLISpec.From.
+                      properties:
+                        config:
+                          type: object
+                          x-kubernetes-preserve-unknown-fields: true
+                        plugin:
+                          minLength: 1
+                          type: string
+                      required:
+                      - plugin
+                      type: object
                     max:
                       description: |-
                         Numeric thresholds and bounds are carried as decimal strings in the CRD API to
@@ -109,12 +123,6 @@ spec:
                         Numeric thresholds and bounds are carried as decimal strings in the CRD API to
                         avoid Kubernetes' discouraged float fields; they are parsed by internal/analysis.
                       pattern: ^-?[0-9]+(\.[0-9]+)?%?$
-                      type: string
-                    provider:
-                      description: Inline provider query form (guardrail without a
-                        named SLI).
-                      type: string
-                    query:
                       type: string
                     sli:
                       type: string
@@ -200,26 +208,57 @@ spec:
                 type: object
               slis:
                 items:
-                  description: SLISpec declares one service-level indicator and the
-                    provider that evaluates it.
+                  description: |-
+                    SLISpec declares one service-level indicator and where its value comes from.
+                    Exactly one of From/Driver/Derived must be set.
                   properties:
                     class:
                       description: 'Trust class: fidelity | client | server | derived
                         (§11).'
                       type: string
-                    expr:
-                      type: string
+                    derived:
+                      description: |-
+                        Derived computes the SLI in-core from other SLIs of the same trial; no plugin
+                        is involved.
+                      properties:
+                        expr:
+                          minLength: 1
+                          type: string
+                      required:
+                      - expr
+                      type: object
+                    driver:
+                      description: |-
+                        Driver reads a metric the workload's load driver reported when the run ended.
+                        The core already holds these (StopResponse.metrics), so no plugin round-trip is
+                        involved — and any driver's metric names work, not just an HTTP replay's.
+                      properties:
+                        metric:
+                          minLength: 1
+                          type: string
+                      required:
+                      - metric
+                      type: object
+                    from:
+                      description: |-
+                        From evaluates the SLI through a provider plugin. Config is the provider's own
+                        query dialect — `{query: <PromQL>}` for prometheus, whatever a third-party
+                        provider declares. The core treats it as opaque (docs/GENERALIZATION.md G6).
+                      properties:
+                        config:
+                          type: object
+                          x-kubernetes-preserve-unknown-fields: true
+                        plugin:
+                          minLength: 1
+                          type: string
+                      required:
+                      - plugin
+                      type: object
                     name:
                       minLength: 1
                       type: string
-                    provider:
-                      minLength: 1
-                      type: string
-                    query:
-                      type: string
                   required:
                   - name
-                  - provider
                   type: object
                 minItems: 1
                 type: array
@@ -236,7 +275,7 @@ spec:
                     items:
                       description: |-
                         Dimension is one axis of the search space. Exactly one of Int/Float/Categorical
-                        must be set. Names are target-plugin dimension paths (e.g. agent.batchSize).
+                        must be set.
                       properties:
                         categorical:
                           properties:
@@ -284,8 +323,22 @@ spec:
                           - max
                           - min
                           type: object
+                        mapping:
+                          description: |-
+                            Mapping carries a richer target-defined mapping for dimensions a single Path
+                            cannot express (e.g. one axis fanning out to several fields). Opaque to the
+                            core; validated by the target plugin.
+                          type: object
+                          x-kubernetes-preserve-unknown-fields: true
                         name:
                           minLength: 1
+                          type: string
+                        path:
+                          description: |-
+                            Path is the target-plugin config location this dimension writes: a Helm value
+                            path (`.env.GOGC`), a JSON pointer, a flag name — whatever the target's
+                            Contract() accepts. Defaults to Name, preserving the "dimension names are
+                            target paths" convention target-kapture relies on (DESIGN.md §8).
                           type: string
                       required:
                       - name
@@ -347,12 +400,28 @@ spec:
                 type: object
               workloads:
                 items:
+                  description: |-
+                    Workload is one load definition: a driver plugin, its driver-defined config, and
+                    the measurement window around it. The core knows nothing about what the driver
+                    does — replay, synthetic request generation, a batch submission, a query harness
+                    (DESIGN.md §8; docs/GENERALIZATION.md G1).
                   properties:
+                    completion:
+                      default: duration
+                      description: Completion selects what ends the measurement window
+                        (see CompletionMode).
+                      enum:
+                      - duration
+                      - driver
+                      type: string
                     cooldown:
+                      description: Cooldown quiesces the system after the window closes,
+                        before collection.
                       type: string
                     datasetRef:
-                      description: LocalRef references an object by name in the same
-                        namespace.
+                      description: |-
+                        DatasetRef names the corpus this workload replays or reads. Optional: drivers
+                        that generate load synthetically have no dataset.
                       properties:
                         name:
                           minLength: 1
@@ -360,67 +429,44 @@ spec:
                       required:
                       - name
                       type: object
+                    driver:
+                      description: |-
+                        Driver names a Ready Plugin of kind loaddriver plus its config. The config is
+                        opaque to parallax and validated by the plugin's Describe() JSON Schema — a
+                        replay driver takes rate/distribution/abort here, a batch driver takes a job
+                        template, a query driver takes a scale factor.
+                      properties:
+                        config:
+                          type: object
+                          x-kubernetes-preserve-unknown-fields: true
+                        plugin:
+                          minLength: 1
+                          type: string
+                      required:
+                      - plugin
+                      type: object
+                    maxDuration:
+                      description: |-
+                        MaxDuration caps the measurement window regardless of mode: a driver that
+                        never reports done, or a run that overshoots, aborts the trial rather than
+                        burning the study's wall-clock budget.
+                      type: string
                     measure:
+                      default: 5m
+                      description: |-
+                        Measure is the measurement window for completion=duration. Ignored when
+                        completion=driver, where the driver decides and MaxDuration bounds it.
+                        Defaulted so an omitted window can never silently mean "measure nothing".
                       type: string
                     name:
                       minLength: 1
                       type: string
-                    replay:
-                      description: ReplaySpec mirrors CaptureLoadTest.spec field names
-                        (DESIGN.md §8, App. A.1).
-                      properties:
-                        abort:
-                          properties:
-                            errorPercent:
-                              format: int32
-                              type: integer
-                            maxDuration:
-                              type: string
-                          type: object
-                        distribution:
-                          properties:
-                            cells:
-                              items:
-                                type: string
-                              type: array
-                            concurrencyPerWorker:
-                              format: int32
-                              type: integer
-                            workersPerSpoke:
-                              format: int32
-                              type: integer
-                          type: object
-                        engine:
-                          type: string
-                        rate:
-                          properties:
-                            mode:
-                              enum:
-                              - Constant
-                              - OriginalTiming
-                              - Unlimited
-                              type: string
-                            requestsPerSecond:
-                              format: int64
-                              type: integer
-                            timeScale:
-                              description: |-
-                                Numeric thresholds and bounds are carried as decimal strings in the CRD API to
-                                avoid Kubernetes' discouraged float fields; they are parsed by internal/analysis.
-                              pattern: ^-?[0-9]+(\.[0-9]+)?%?$
-                              type: string
-                          required:
-                          - mode
-                          type: object
-                      required:
-                      - rate
-                      type: object
                     warmup:
+                      description: Warmup runs the load unmeasured before t1 is stamped.
                       type: string
                   required:
-                  - datasetRef
+                  - driver
                   - name
-                  - replay
                   type: object
                 minItems: 1
                 type: array

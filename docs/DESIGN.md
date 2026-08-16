@@ -34,7 +34,7 @@ Architecturally, parallax is **operator-first and plugin-first**: a Kubernetes o
 - **Not an APM/observability product.** Parallax queries metrics backends through provider plugins; it does not replace them.
 - **Not a general CI system.** It orchestrates benchmark studies; scheduling/infra beyond that stays in CI/GitOps.
 - **Not autoscaling/auto-tuning in production.** Parallax recommends and gates configs offline. Closing the loop live is out of scope for v1.
-- **Not load testing arbitrary protocols.** v1 speaks what kapture replays: HTTP and gRPC.
+- **Not a load generator.** Parallax generates no load of its own and models no protocol. A load driver plugin starts something, reports progress, and stops with metrics; what happens in between — replayed HTTP/gRPC traffic, synthetic requests, a batch job, a query harness, an eval suite — is the driver's business and never appears in the CRDs (`docs/GENERALIZATION.md` G1, G5). The first-party drivers cover what kapture replays; anything else is a plugin, not a fork.
 - **Not open-core.** Security, HA, and multi-tenancy are not held back for a paid tier; the whole platform is Apache-2.0.
 
 ---
@@ -101,7 +101,7 @@ flowchart LR
                 SCN[[scenario-*]]
                 EXP[[exporter-*]]
             end
-            SC <-->|ask/tell| STRAT
+            SC <-->|ask| STRAT
             TC --> TGT & LD & MP & SCN
         end
         CRD[(Study · Trial<br/>Plugin · Dataset CRs)] --> SC & PC & DC
@@ -183,9 +183,9 @@ Everything extends through one mechanism: **gRPC subprocess plugins** behind a v
 | Kind | Service (beyond lifecycle) | First-party plugins | Swap boundary |
 |---|---|---|---|
 | `target` | `Prepare / Apply / Ready / Reset / Contract` | `target-kapture` (chart overlays, CR patches, health gates, **readback fidelity provider**), `target-helm` (generic values/patches) | trial boundary |
-| `loaddriver` | `Plan / Start / Watch (stream) / Stop` | `loaddriver-kapture` (CaptureLoadTest composition + rollup watch; `direct` mode runs engine Jobs without the hub) | trial boundary |
-| `provider` | `Capabilities / Collect(window, queries) / Snapshot` | `provider-prometheus` (any PromQL-compatible endpoint: Prometheus, Thanos, Mimir, VictoriaMetrics, Cortex), `provider-otlp` (hosts an OTLP receiver; SUTs/engines push OTel metrics, provider aggregates over the window), `provider-runreport` (kapture `TrafficReplay`/`CaptureLoadTest` statuses) | trial boundary |
-| `strategy` | `Init(space, budget) / Ask / Tell / Report` | `strategy-grid`, `strategy-random`, `strategy-sobol`, `strategy-asha` (also compiled in for `--local` zero-dep runs), `strategy-optuna` (Python) | between ask/tell calls |
+| `loaddriver` | `Plan / Start / Progress / Stop` | `loaddriver-kapture` (CaptureLoadTest composition + rollup watch; `direct` mode runs engine Jobs without the hub) | trial boundary |
+| `provider` | `Capabilities / Collect(window, queries) / Snapshot` | `provider-prometheus` (any PromQL-compatible endpoint: Prometheus, Thanos, Mimir, VictoriaMetrics, Cortex), `provider-otlp` (hosts an OTLP receiver; SUTs/engines push OTel metrics, provider aggregates over the window), | trial boundary |
+| `strategy` | `Ask(space, budget, seed, observations, pending)` — stateless | `builtin:grid` / `builtin:random` compiled in for `--local` zero-dep runs; `strategy-grid`, `strategy-random`, `strategy-sobol`, `strategy-asha`, `strategy-optuna` (Python) as Plugin CRs | between Ask calls |
 | `scenario` | `Inject / Verify / Revert (stream events)` | `scenario-pod-kill`, `scenario-netpol-outage`, `scenario-rate-burst`, `scenario-hpa-ramp` | trial boundary |
 | `exporter` | `Export(event, refs)` | `exporter-webhook`, `exporter-slack`, `exporter-ocibundle` (pushes report bundles as OCI artifacts) | anytime (idempotent) |
 
@@ -234,7 +234,7 @@ The Plugin controller resolves the image, **verifies the cosign signature** per 
 ### 5.4 Hot reload
 
 - The host fsnotify-watches the plugin dir (debounced ~500ms, matching kapture). A changed binary (new digest from a `Plugin` CR update rolling through the installer) triggers **drain-and-swap**: `Drain()` the old subprocess (bounded grace, default 30s), launch the new one, `Describe`/`Configure`, then route new calls to it. A failed reload keeps the old process running and marks the `Plugin` CR `Degraded` with an Event — never a silent downgrade to nothing.
-- **Swap boundaries protect trial integrity** (§5.1): `target`, `loaddriver`, `provider`, and `scenario` plugins are only swapped *between* trials — a running trial pins its plugin set (the resolved digests are part of the trial's environment fingerprint, so a mid-study plugin upgrade is visible in the data and validation refuses to mix fingerprints). `strategy` swaps between ask/tell calls; `exporter` swaps anytime.
+- **Swap boundaries protect trial integrity** (§5.1): `target`, `loaddriver`, `provider`, and `scenario` plugins are only swapped *between* trials — a running trial pins its plugin set (the resolved digests are part of the trial's environment fingerprint, so a mid-study plugin upgrade is visible in the data and validation refuses to mix fingerprints). `strategy` swaps between `Ask` calls (it holds no state to lose); `exporter` swaps anytime.
 - Rollback = re-point the `Plugin` CR at the previous digest; same path, no special case. GitOps-friendly by construction.
 
 ### 5.5 Plugin security model
@@ -352,52 +352,74 @@ spec:
   workloads:
     - name: steady-2k
       datasetRef: { name: prod-edge-2026-07-14 }     # Dataset CR, must be Verified
-      replay:
-        engine: builtin
-        rate: { mode: Constant, requestsPerSecond: 2000 }   # aggregate; split across shards
-        distribution: { cells: [bench-a], workersPerSpoke: 2, concurrencyPerWorker: 25 }
-        abort: { maxDuration: 10m, errorPercent: 10 }
+      driver:                       # kind=loaddriver plugin + its own config schema
+        plugin: loaddriver-kapture
+        config:                     # opaque to parallax; validated by the plugin
+          engine: builtin
+          rate: { mode: Constant, requestsPerSecond: 2000 } # aggregate; split across shards
+          distribution: { cells: [bench-a], workersPerSpoke: 2, concurrencyPerWorker: 25 }
+          abort: { maxDuration: 10m, errorPercent: 10 }
+      completion: duration          # or `driver`, for run-to-completion workloads (§9)
       warmup: 2m
       measure: 5m
+      maxDuration: 10m
       cooldown: 30s
 
-  slis:                             # every SLI names its provider (§11)
+  slis:                             # each SLI names one of three sources (§11)
     - name: capture_loss_ratio
-      provider: readback            # registered by target-kapture; exact reconciliation
+      class: fidelity
+      from: { plugin: readback }    # registered by target-kapture; exact reconciliation
     - name: capture_drop_ratio
-      provider: prometheus
-      query: |
-        sum(rate(capture_agent_requests_dropped_total[{{.Window}}]))
-          / sum(rate(capture_agent_requests_total[{{.Window}}]))
+      class: server
+      from:                         # provider plugin + that provider's own dialect
+        plugin: prometheus
+        config:
+          query: |
+            sum(rate(capture_agent_requests_dropped_total[{{.Window}}]))
+              / sum(rate(capture_agent_requests_total[{{.Window}}]))
     - name: queue_saturation_peak
-      provider: prometheus
-      query: |
-        max_over_time((capture_agent_write_queue_depth
-          / capture_agent_write_queue_capacity)[{{.Window}}:15s])
-    - name: replay_error_ratio
-      provider: runreport           # aggregated across shard run reports
-      expr: failedRequests / sentRequests
+      class: server
+      from:
+        plugin: prometheus
+        config:
+          query: |
+            max_over_time((capture_agent_write_queue_depth
+              / capture_agent_write_queue_capacity)[{{.Window}}:15s])
     - name: client_p99_ms
-      provider: runreport
-      expr: p99LatencyMs
+      class: client
+      driver: { metric: p99_latency_ms }   # the driver's own metric names, no plugin hop
+    - name: replay_failed_requests
+      class: client
+      driver: { metric: failed_requests }
+    - name: replay_sent_requests
+      class: client
+      driver: { metric: sent_requests }
+    - name: replay_error_ratio
+      class: derived
+      derived: { expr: replay_failed_requests / replay_sent_requests }
     - name: agent_cpu_cores
-      provider: prometheus
-      query: |
-        sum(rate(container_cpu_usage_seconds_total{pod=~"capture-agent-.*"}[{{.Window}}]))
+      class: server
+      from:
+        plugin: prometheus
+        config:
+          query: |
+            sum(rate(container_cpu_usage_seconds_total{pod=~"capture-agent-.*"}[{{.Window}}]))
     - name: cpu_seconds_per_1k_captured
-      provider: derived             # in-core arithmetic over other SLIs
-      expr: agent_cpu_cores * 1000 / capture_throughput_rps
+      class: derived                # in-core arithmetic over other SLIs
+      derived: { expr: agent_cpu_cores * 1000 / capture_throughput_rps }
 
   guardrails:
     - { sli: capture_loss_ratio, max: 0.0 }
     - { sli: capture_drop_ratio, max: 0.0 }
     - { sli: replay_error_ratio, max: 0.001 }
     - { sli: client_p99_ms, maxRelativeToBaseline: 1.05 }  # ≤ +5% vs measured baseline
-    - provider: prometheus
-      query: 'sum(increase(capture_agent_storage_write_errors_total[{{.Window}}]))'
+    - from:
+        plugin: prometheus
+        config: { query: 'sum(increase(capture_agent_storage_write_errors_total[{{.Window}}]))' }
       max: 0
-    - provider: prometheus
-      query: 'sum(increase(kube_pod_container_status_restarts_total{namespace="capture-system"}[{{.Window}}]))'
+    - from:
+        plugin: prometheus
+        config: { query: 'sum(increase(kube_pod_container_status_restarts_total{namespace="capture-system"}[{{.Window}}]))' }
       max: 0                        # no OOM/crash restarts, ever
 
   objectives:
@@ -422,7 +444,7 @@ spec:
 ```
 
 Notes:
-- **Dimension names are target-plugin paths.** `target-kapture` maps `agent.batchSize` → the capture-agent flag / pod spec; `target-helm` maps names → Helm value paths or patch pointers. The target's `Contract()` rejects unknown dimensions at admission, not mid-study.
+- **Dimensions carry an explicit target path** (`path:`, defaulting to the dimension name, so the older name-is-the-path convention still holds). `target-kapture` maps `agent.batchSize` → the capture-agent flag / pod spec; `target-helm` maps names → Helm value paths or patch pointers. The target's `Contract()` rejects unknown dimensions at admission, not mid-study.
 - **Constraints** are CEL expressions pruning invalid combinations before trials are spent.
 - **Guardrails support `maxRelativeToBaseline`** so overhead limits track the measured baseline rather than magic absolute numbers.
 - **`{{.Window}}`** is templated at collection time from the trial's recorded measurement window.
@@ -481,9 +503,12 @@ apiVersion: parallax.dev/v1alpha1
 kind: Dataset
 metadata: {name: prod-edge-2026-07-14, namespace: bench}
 spec:
-  captureRef: {namespace: edge, name: checkout-capture}
-  storage: {type: s3, bucket: kapture-bench, prefix: datasets/prod-edge-2026-07-14}
-  preshards: {count: 8}              # kapture-preshard slices, each carrying
+  source:                            # kapture-capture is one kind among
+    kind: kapture-capture            # object-storage / git / generator
+    ref: {name: checkout-capture}
+    config: {namespace: edge}
+  storageRef: {name: bench-dataset-store}
+  preshard: {shards: 8}              # kapture-preshard slices, each carrying
                                      # kapture's own per-slice manifest
 status:
   phase: Verified
@@ -511,7 +536,7 @@ Metrics collection is fully pluggable (§5.1 `provider` kind). What is fixed is 
 | Class | Meaning | First-party providers | Trust model |
 |---|---|---|---|
 | `system` | Sampled backend metrics: CPU/mem, queue depth, drops, control-plane health, restarts | `provider-prometheus` (any PromQL-compatible endpoint: Prometheus, Thanos, Mimir, VictoriaMetrics, Cortex), `provider-otlp` (embedded OTLP receiver; SUTs and engines push OTel metrics; the provider aggregates over the window) | Sampled; window-aligned queries |
-| `client` | Sender-side truth: sent/failed/filtered counts, achieved RPS, latency percentiles | `provider-runreport` (kapture run reports via `TrafficReplay.status` + `CaptureLoadTest.status` cell rollups) | Exact counts from the sender |
+| `client` | Sender-side truth, whatever the driver measures: sent/failed counts and latency percentiles for a request driver, records processed and job duration for a batch driver | the load driver itself, via `slis[].driver` — the core holds these after `Stop`, so no provider plugin is in the path | Exact counts from the sender |
 | `fidelity` | Data-at-rest reconciliation against the dataset ID digest | `readback` (registered by `target-kapture`, which already holds scoped storage credentials — §5.5) | Exact, from data at rest |
 | `derived` | Arithmetic over other SLIs (e.g. CPU-seconds per 1k captured requests) | in-core | Inherits inputs' trust |
 
@@ -539,7 +564,7 @@ Shipped as named, tested query templates; studies reference them by name or supp
 | `queue_drop_count` | prometheus (system) | `sum(increase(capture_agent_queue_dropped_total[W]))` — hot path protected itself |
 | `storage_error_count` | prometheus (system) | `sum(increase(capture_agent_storage_write_errors_total[W]))` |
 | `capture_loss_ratio` / `capture_dup_ratio` | readback (fidelity) | dataset ID-digest reconciliation |
-| `client_p50/p95/p99_ms`, `client_mean_ms` | runreport (client) | shard-aggregated engine latency (client-observed) |
+| `client_p50/p95/p99_ms`, `client_mean_ms` | driver metrics (client) | shard-aggregated engine latency (client-observed) |
 | `replay_achieved_rps` / `replay_error_ratio` | runreport (client) | did the load actually happen as specified (trial-validity check) |
 | `agent_cpu_cores` / `agent_mem_bytes` | prometheus (system) | cAdvisor rates over capture-agent pods |
 | `sut_cpu_cores` / `sut_mem_bytes` | prometheus (system) | same, over the workload target's pods |
@@ -636,7 +661,21 @@ Parallax adopts the abstractions from kapture draft PR #18 (`hpo-benchmark/`, Py
 | `analysis.py` — best-so-far curves, step-wise interpolation onto a common grid, median + IQR across seeds, mean-rank aggregation | `internal/analysis` anytime curves in the study report; rank aggregation used when comparing *strategies* in the conformance suite | Simple-regret framing applies only to synthetic problems (known optimum); real studies report best-config trajectories |
 | `adapters/{random_search, optuna_adapter}.py` | `strategy-random` built-in; `strategy-optuna` as a Python subprocess plugin on the same ABI | Random search stays permanently in the lineup as the sanity floor |
 
-Built-ins (`grid`, `random`, `sobol`, `asha`) ship both as plugin binaries and compiled into the operator/CLI for zero-dependency `--local` runs — same interface either way. External strategies (Optuna/TPE, SMAC, Ax) are ordinary `Plugin` CRs; the Python SDK keeps them ~200 lines. **Fidelity** for ASHA is `(measureDuration, reps)`: survivors promote from 2-min to 5-min to validation-grade windows. Low-fidelity trials carry the caveat PR #18's `NoisyBranin` models deliberately — they are *biased*, not just noisy (short windows overweight warmup effects) — which is exactly why promotion decisions only ever read validation-fidelity data.
+Built-ins ship both as plugin binaries and compiled into the operator/CLI for zero-dependency `--local` runs — same interface either way. A study names its search explicitly: `builtin:grid` and `builtin:random` run compiled-in, and **any other name is a `Plugin` CR that must be Ready**. There is no fuzzy matching and no fallback between the two, because a study that silently searched a different space than the one it declared has produced worthless results; an unresolvable strategy fails the study with the reason on `status.conditions`. External strategies (Optuna/TPE, SMAC, Ax) are ordinary `Plugin` CRs; the Python SDK keeps them ~200 lines. **Fidelity** for ASHA is `(measureDuration, reps)`: survivors promote from 2-min to 5-min to validation-grade windows. Low-fidelity trials carry the caveat PR #18's `NoisyBranin` models deliberately — they are *biased*, not just noisy (short windows overweight warmup effects) — which is exactly why promotion decisions only ever read validation-fidelity data.
+
+### 14.1 Why `Ask` is stateless
+
+PR #18's `optimizer.py` is a stateful object: `ask()` and `tell()` mutate a search that lives across calls. Parallax deliberately does **not** carry that shape into the ABI. `Ask` is a pure function of `(space, budget, seed, observations, pending)` — the host passes the full evaluation history on every call, and the plugin holds nothing between calls.
+
+Three properties of this platform force it:
+
+- **Plugins hot-reload** (§5.4). A drain-and-swap mid-study would silently discard a stateful optimizer's search tree. Statelessness makes reload a non-event.
+- **One process serves every study.** A `Plugin` CR is a single subprocess; per-study session state inside it would have to be keyed, isolated, and garbage-collected, and getting that wrong cross-contaminates two studies' searches. The old `Init/Ask` pair had no session key at all, so two concurrent studies shared one cursor.
+- **The results DB is already the history** (§15). Rebuilding observations from it is what makes a study resumable after an operator restart — the controller has no memory between reconciles either, so passing history is the only shape that survives a crash.
+
+The cost is that a strategy re-derives its internal state per batch. For expensive optimizers this is real, and the mitigation is ordinary caching keyed on a hash of the observation set — a plugin concern, not an ABI one. The controller asks in batches (`space.strategy.config.batchSize`, default 8) and only re-asks when there is room in flight, so an adaptive strategy still sees each batch's results before choosing the next.
+
+The evaluation loop stays in the Study controller: a strategy suggests points, it never decides how many trials get spent.
 
 ---
 
@@ -726,7 +765,7 @@ parallax/
     plugins/                 # first-party plugin mains → parallax-<kind>-<name>
       target-kapture/  target-helm/
       loaddriver-kapture/
-      provider-prometheus/  provider-otlp/  provider-runreport/
+      provider-prometheus/  provider-otlp/
       strategy-grid/  strategy-random/  strategy-sobol/  strategy-asha/
       scenario-pod-kill/  scenario-netpol-outage/  scenario-rate-burst/  scenario-hpa-ramp/
       exporter-webhook/  exporter-ocibundle/
@@ -784,7 +823,7 @@ The `hpo-benchmark/` harness (draft PR #18 in kapture) is the search layer of th
 ## 21. Roadmap
 
 - **M0 — Operator + plugin skeleton**: CRDs (`Study`/`Trial`/`Plugin`/`Dataset`) + controllers; plugin ABI v1 + host with install/verify/hot-reload; `target-kapture`, `loaddriver-kapture`, `provider-prometheus`; Postgres/SQLite store + migrations; kind env-up (kapture + Envoy Gateway + MinIO + prom-lite). *Exit: a 1-point Study CR runs end-to-end on kind (`--local`), SLI rows land in the DB, report renders.*
-- **M1 — Sweep + select**: space/constraints/hashing; `strategy-{grid,random,sobol}` + conformance suite (absorbing PR #18); `provider-runreport` + readback via `target-kapture`; guardrails, Pareto, decision records; DB-driven resume. *Exit: 40-point screening study selects candidates reproducibly; `parallax select` replays the decision offline from the DB.*
+- **M1 — Sweep + select**: space/constraints/hashing; `strategy-{grid,random,sobol}` + conformance suite (absorbing PR #18); driver-metric SLIs + readback via `target-kapture`; guardrails, Pareto, decision records; DB-driven resume. *Exit: 40-point screening study selects candidates reproducibly; `parallax select` replays the decision offline from the DB.*
 - **M2 — Validate + promote + harden**: interleaved reps, stats engine, scenario plugins (pod-kill/netpol-outage/rate-burst/hpa-ramp), approval flow, promotion artifacts; cosign verification, SBOMs, NetworkPolicies, `ci smoke`/`ci gate`. *Exit: a golden capture-agent config PRs into kapture's chart with a decision record attached and an approver on file.*
 - **M3 — Scale + ecosystem**: `cluster`/`fleet` modes via CaptureLoadTest cells + `clusterRef` scheduling; `strategy-asha`; `strategy-optuna` (Python SDK); `provider-otlp`; exporter plugins; multi-tenancy gating + HA docs; air-gap bundle. *Exit: fleet study tunes a non-kapture service under replayed production traffic from a GitOps-managed Study.*
 - **M4 — Depth**: scheduled/recurring studies with drift lineage; `StudyQuota`; dataset tooling depth (PR #15 dataset-v1 alignment); report UI; `v1beta1` + conversion webhooks.

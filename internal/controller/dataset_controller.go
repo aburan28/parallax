@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -47,8 +48,26 @@ type DatasetReconciler struct {
 // +kubebuilder:rbac:groups=parallax.dev,resources=datasets/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
-// Reconcile stamps the dataset Verified. TODO(m1): real manifest verification
-// (manifest <-> slice manifests <-> objects) against storage before stamping.
+// datasetSourceKey renders a source into the stable identity string the placeholder
+// digest is derived from. Kinds address their corpus differently — a named in-cluster
+// object, a URI, or config alone for a generator — so all three contribute.
+func datasetSourceKey(src v1alpha1.DatasetSource) string {
+	parts := []string{src.Kind}
+	if src.Ref != nil {
+		parts = append(parts, src.Ref.Name)
+	}
+	if src.URI != "" {
+		parts = append(parts, src.URI)
+	}
+	if src.Config != nil {
+		parts = append(parts, string(src.Config.Raw))
+	}
+	return strings.Join(parts, "/")
+}
+
+// Reconcile stamps the dataset Verified. TODO(m1): delegate real verification to the
+// load driver that consumes the corpus — only it knows the record format — and record
+// the true content digest and record count (docs/GENERALIZATION.md G2).
 func (r *DatasetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
@@ -74,7 +93,7 @@ func (r *DatasetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	// content digest and record count. For M0 we derive a placeholder id digest from the
 	// dataset identity so downstream fingerprints have a stable value to reference.
 	if ds.Status.IDDigest == "" {
-		ds.Status.IDDigest = "sha256:" + shortHash([]byte(ds.Namespace+"/"+ds.Name+"/"+ds.Spec.CaptureRef.Name))
+		ds.Status.IDDigest = "sha256:" + shortHash([]byte(ds.Namespace+"/"+ds.Name+"/"+datasetSourceKey(ds.Spec.Source)))
 	}
 	now := metav1.Now()
 	ds.Status.VerifiedAt = &now

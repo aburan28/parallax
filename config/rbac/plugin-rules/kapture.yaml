@@ -1,0 +1,30 @@
+# kapture load-generation CRs — needed by loaddriver-kapture and target-kapture
+# only (DESIGN.md §16, Appendix A.1).
+#
+# Bound directly to the manager ServiceAccount: the base manager ClusterRole has no
+# aggregationRule (adding one would let the aggregation controller overwrite its
+# rules), so each opt-in bundle carries its own binding.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: parallax-plugin-kapture
+rules:
+  - apiGroups: ["capture.gateway.io"]
+    resources: ["captureloadtests", "trafficreplays", "trafficcaptures"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["capture.gateway.io"]
+    resources: ["captureloadtests/status", "trafficreplays/status"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: parallax-plugin-kapture
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: parallax-plugin-kapture
+subjects:
+  - kind: ServiceAccount
+    name: parallax-controller-manager
+    namespace: parallax-system

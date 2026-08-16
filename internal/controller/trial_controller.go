@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strconv"
 	"time"
 
@@ -46,13 +47,14 @@ const pluginCallTimeout = 30 * time.Second
 // per reconcile so each phase boundary is observable and idempotent.
 const trialRequeue = 2 * time.Second
 
+// maxTrialRequeue caps how long the trial sleeps while waiting out a warmup or
+// measurement window. Long windows still get polled often enough that a driver abort
+// is noticed promptly rather than at the end of the window.
+const maxTrialRequeue = 15 * time.Second
+
 // healthGateTimeout bounds how long the HealthGate phase waits for target.Ready to
 // report ready before the trial is failed (DESIGN.md §9).
 const healthGateTimeout = 5 * time.Minute
-
-// loadRunRefAnnotation stores the load driver's run handle between Start and Stop so
-// the reconcile that stops the load can reference the run the earlier reconcile began.
-const loadRunRefAnnotation = "parallax.dev/load-run-ref"
 
 // TrialReconciler executes one Trial CR through the state machine (DESIGN.md §9),
 // calling plugins at the right boundaries and persisting evidence to the results DB.
@@ -79,6 +81,73 @@ type resolvedPlugins struct {
 	target     string
 	loadDriver string
 	providers  []string
+}
+
+// trialContext is what a reconcile needs from the trial's parent Study: the study
+// itself, the workload this trial runs, and the plugins to call. The workload is what
+// makes the trial clock work — it carries the window durations and who closes them.
+type trialContext struct {
+	study    *v1alpha1.Study
+	workload *v1alpha1.Workload
+	plugins  resolvedPlugins
+}
+
+// warmup is the unmeasured run-in before t1. The trial's own fidelity dial wins over
+// the workload's default, so screening and validation reps can differ (§7).
+func (tc trialContext) warmup(trial *v1alpha1.Trial) time.Duration {
+	if d := trial.Spec.Fidelity.Warmup.Duration; d > 0 {
+		return d
+	}
+	if tc.workload != nil {
+		return tc.workload.Warmup.Duration
+	}
+	return 0
+}
+
+// measure is the measurement window for completion=duration workloads.
+func (tc trialContext) measure(trial *v1alpha1.Trial) time.Duration {
+	if d := trial.Spec.Fidelity.Measure.Duration; d > 0 {
+		return d
+	}
+	if tc.workload != nil {
+		return tc.workload.Measure.Duration
+	}
+	return 0
+}
+
+// maxDuration caps the measurement window in either completion mode; 0 means uncapped.
+func (tc trialContext) maxDuration() time.Duration {
+	if tc.workload == nil {
+		return 0
+	}
+	return tc.workload.MaxDuration.Duration
+}
+
+// cooldown quiesces the system after t2, before collection.
+func (tc trialContext) cooldown() time.Duration {
+	if tc.workload == nil {
+		return 0
+	}
+	return tc.workload.Cooldown.Duration
+}
+
+// driverCompleted reports whether this workload's window is closed by the driver
+// reporting done rather than by a fixed duration elapsing (docs/GENERALIZATION.md G1).
+func (tc trialContext) driverCompleted() bool {
+	return tc.workload != nil && tc.workload.Completion == v1alpha1.CompletionDriver
+}
+
+// requeueWithin turns a remaining wait into a requeue delay: never busier than
+// trialRequeue, never sleepier than maxTrialRequeue.
+func requeueWithin(remaining time.Duration) time.Duration {
+	switch {
+	case remaining < trialRequeue:
+		return trialRequeue
+	case remaining > maxTrialRequeue:
+		return maxTrialRequeue
+	default:
+		return remaining
+	}
 }
 
 // +kubebuilder:rbac:groups=parallax.dev,resources=trials,verbs=get;list;watch;create;update;patch;delete
@@ -110,9 +179,11 @@ func (r *TrialReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	}
 	trial.Status.ObservedGeneration = trial.Generation
 
-	// Resolve the parent Study to find the plugins this trial drives. Absence is not
-	// fatal in M0 — the state machine still runs, plugin calls are simply skipped.
-	pl, study := r.resolvePlugins(ctx, &trial)
+	// Resolve the parent Study to find the workload and plugins this trial drives.
+	// Absence is not fatal in M0 — the state machine still runs, plugin calls are
+	// simply skipped.
+	tc := r.resolveContext(ctx, &trial)
+	pl, study := tc.plugins, tc.study
 
 	now := func() *metav1.Time { t := metav1.Now(); return &t }
 
@@ -132,7 +203,7 @@ func (r *TrialReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 		if pl.target != "" {
 			resp, err := r.plugins().Apply(cctx, pl.target, &pluginv1.ApplyRequest{
 				ConfigHash:    trial.Spec.ConfigHash,
-				Dimensions:    trial.Spec.Dimensions,
+				Assignments:   assignments(tc, &trial),
 				RawConfigJson: rawConfig(&trial),
 			})
 			if err != nil {
@@ -166,39 +237,77 @@ func (r *TrialReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 		trial.Status.Phase = v1alpha1.TrialPhaseWarmup
 
 	case v1alpha1.TrialPhaseWarmup:
-		// loaddriver.Start begins replay; warmup is not measured. The run is keyed by
-		// trial UID so a later reconcile can Stop it without cross-reconcile state.
-		if pl.loadDriver != "" {
-			if _, err := r.plugins().StartLoad(cctx, pl.loadDriver, &pluginv1.StartRequest{
-				TrialId:      string(trial.UID),
-				WorkloadJson: workloadJSON(study, &trial),
-			}); err != nil {
-				r.pluginSkipped(ctx, &trial, "LoadStart", pl.loadDriver, err)
+		// Start the load exactly once, then hold here for the warmup — run-in traffic
+		// is deliberately not measured. The driver's opaque handle is recorded on
+		// status so later reconciles drive the same run; the ABI never requires a
+		// driver to key its runs by trial id (docs/GENERALIZATION.md G5).
+		if trial.Status.Timeline.LoadStarted == nil {
+			if pl.loadDriver != "" {
+				resp, err := r.plugins().StartLoad(cctx, pl.loadDriver, &pluginv1.StartRequest{
+					TrialId:      string(trial.UID),
+					WorkloadJson: workloadJSON(tc, &trial),
+				})
+				if err != nil {
+					r.pluginSkipped(ctx, &trial, "LoadStart", pl.loadDriver, err)
+				} else {
+					trial.Status.Load.RunRef = resp.GetRunRef()
+				}
 			}
+			trial.Status.Timeline.LoadStarted = now()
+		}
+		if elapsed, warm := since(trial.Status.Timeline.LoadStarted), tc.warmup(&trial); elapsed < warm {
+			if err := r.Status().Update(ctx, &trial); err != nil {
+				return ctrl.Result{}, fmt.Errorf("update warming trial status: %w", err)
+			}
+			return ctrl.Result{RequeueAfter: requeueWithin(warm - elapsed)}, nil
 		}
 		// t1 is stamped as measurement begins (after warmup) — §9 "timestamps are law".
 		trial.Status.Timeline.T1 = now()
 		trial.Status.Phase = v1alpha1.TrialPhaseMeasuring
 
 	case v1alpha1.TrialPhaseMeasuring:
-		// Measurement window closes: stamp t2 and stop the load driver. An abort reported
-		// by the driver terminates the trial as Aborted (recorded, §9).
-		trial.Status.Timeline.T2 = now()
-		if pl.loadDriver != "" {
-			resp, err := r.plugins().StopLoad(cctx, pl.loadDriver, &pluginv1.StopRequest{
-				RunRef: string(trial.UID),
-			})
-			if err != nil {
-				r.pluginSkipped(ctx, &trial, "LoadStop", pl.loadDriver, err)
-			} else if resp != nil && !resp.GetOk() {
-				return r.failTrial(ctx, &trial, v1alpha1.TrialPhaseAborted, "LoadAborted", "load driver reported an aborted run")
+		// Hold the window open until whatever closes it says so: a fixed duration for
+		// continuous workloads, or the driver reporting done for run-to-completion
+		// ones. Either way the driver is polled each reconcile so its abort policy is
+		// enforced by the core rather than merely declared (G1, G5).
+		elapsed := since(trial.Status.Timeline.T1)
+		done, aborted, reason := r.pollLoad(cctx, pl.loadDriver, &trial)
+		switch {
+		case aborted:
+			trial.Status.Load.Aborted = true
+			trial.Status.Load.AbortReason = reason
+			r.stopLoad(cctx, pl.loadDriver, &trial)
+			return r.failTrial(ctx, &trial, v1alpha1.TrialPhaseAborted, "LoadAborted", reason)
+
+		case !windowClosed(tc, &trial, elapsed, done):
+			if max := tc.maxDuration(); max > 0 && elapsed >= max {
+				r.stopLoad(cctx, pl.loadDriver, &trial)
+				return r.failTrial(ctx, &trial, v1alpha1.TrialPhaseAborted, "MeasureDeadlineExceeded",
+					fmt.Sprintf("measurement window hit maxDuration %s before closing; the trial is not comparable", max))
 			}
+			if err := r.Status().Update(ctx, &trial); err != nil {
+				return ctrl.Result{}, fmt.Errorf("update measuring trial status: %w", err)
+			}
+			return ctrl.Result{RequeueAfter: requeueWithin(tc.measure(&trial) - elapsed)}, nil
+		}
+
+		// Window closes: stamp t2 first so nothing after this point can widen it.
+		trial.Status.Timeline.T2 = now()
+		if ok := r.stopLoad(cctx, pl.loadDriver, &trial); !ok {
+			return r.failTrial(ctx, &trial, v1alpha1.TrialPhaseAborted, "LoadStopFailed",
+				"load driver did not report a clean stop")
 		}
 		trial.Status.Phase = v1alpha1.TrialPhaseDraining
 
 	case v1alpha1.TrialPhaseDraining:
 		// Drain before collect: buffers flush before readback (§9). TODO(m1): gate on
-		// capture_agent_write_queue_depth == 0 and max(flushInterval)+margin elapsed.
+		// a driver/target-reported quiesce signal rather than the cooldown alone.
+		if elapsed, cool := since(trial.Status.Timeline.T2), tc.cooldown(); elapsed < cool {
+			if err := r.Status().Update(ctx, &trial); err != nil {
+				return ctrl.Result{}, fmt.Errorf("update draining trial status: %w", err)
+			}
+			return ctrl.Result{RequeueAfter: requeueWithin(cool - elapsed)}, nil
+		}
 		trial.Status.Timeline.Drained = now()
 		trial.Status.Phase = v1alpha1.TrialPhaseCollecting
 
@@ -237,37 +346,120 @@ func (r *TrialReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	return ctrl.Result{RequeueAfter: trialRequeue}, nil
 }
 
-// resolvePlugins fetches the parent Study (best-effort) and maps its spec onto the
-// plugin names this trial drives.
-func (r *TrialReconciler) resolvePlugins(ctx context.Context, trial *v1alpha1.Trial) (resolvedPlugins, *v1alpha1.Study) {
+// resolveContext fetches the parent Study (best-effort) and maps its spec onto the
+// workload and plugin names this trial drives.
+func (r *TrialReconciler) resolveContext(ctx context.Context, trial *v1alpha1.Trial) trialContext {
 	log := logf.FromContext(ctx)
 	var study v1alpha1.Study
 	if err := r.Get(ctx, client.ObjectKey{Namespace: trial.Namespace, Name: trial.Spec.StudyRef.Name}, &study); err != nil {
 		if !apierrors.IsNotFound(err) {
 			log.Error(err, "get parent study", "study", trial.Spec.StudyRef.Name)
 		}
-		return resolvedPlugins{}, nil
+		return trialContext{}
 	}
-	pl := resolvedPlugins{target: study.Spec.Target.Plugin}
-	// The load driver plugin is the workload's replay engine (§8, App. A.2).
+	tc := trialContext{study: &study, plugins: resolvedPlugins{target: study.Spec.Target.Plugin}}
+	// The load driver is named by the workload, independently of what it drives (§8).
 	for i := range study.Spec.Workloads {
 		if study.Spec.Workloads[i].Name == trial.Spec.Workload {
-			pl.loadDriver = study.Spec.Workloads[i].Replay.Engine
+			tc.workload = &study.Spec.Workloads[i]
+			tc.plugins.loadDriver = tc.workload.Driver.Plugin
 			break
 		}
 	}
 	seen := map[string]struct{}{}
 	for _, sli := range study.Spec.SLIs {
-		if sli.Provider == "" {
+		if sli.From == nil || sli.From.Plugin == "" {
 			continue
 		}
-		if _, dup := seen[sli.Provider]; dup {
+		if _, dup := seen[sli.From.Plugin]; dup {
 			continue
 		}
-		seen[sli.Provider] = struct{}{}
-		pl.providers = append(pl.providers, sli.Provider)
+		seen[sli.From.Plugin] = struct{}{}
+		tc.plugins.providers = append(tc.plugins.providers, sli.From.Plugin)
 	}
-	return pl, &study
+	return tc
+}
+
+// windowClosed reports whether the measurement window should close now: the driver
+// says so for completion=driver workloads, otherwise the measure duration has run out.
+// A zero measure closes immediately, which is why the CRD defaults it.
+func windowClosed(tc trialContext, trial *v1alpha1.Trial, elapsed time.Duration, driverDone bool) bool {
+	if tc.driverCompleted() {
+		return driverDone
+	}
+	return elapsed >= tc.measure(trial)
+}
+
+// pollLoad asks the driver how the run is going. An unreachable driver is reported as
+// neither done nor aborted, so a plugin outage cannot silently truncate a window.
+func (r *TrialReconciler) pollLoad(ctx context.Context, driver string, trial *v1alpha1.Trial) (done, aborted bool, reason string) {
+	if driver == "" || trial.Status.Load.RunRef == "" {
+		return false, false, ""
+	}
+	resp, err := r.plugins().Progress(ctx, driver, &pluginv1.ProgressRequest{RunRef: trial.Status.Load.RunRef})
+	if err != nil {
+		r.pluginSkipped(ctx, trial, "LoadProgress", driver, err)
+		return false, false, ""
+	}
+	return resp.GetDone(), resp.GetAborted(), resp.GetAbortReason()
+}
+
+// stopLoad ends the driver run and records its summary metrics on status, where
+// `driver`-sourced SLIs read them. It reports whether the driver stopped cleanly; an
+// unreachable driver counts as clean so an unwired plugin cannot fail every trial.
+func (r *TrialReconciler) stopLoad(ctx context.Context, driver string, trial *v1alpha1.Trial) bool {
+	if driver == "" || trial.Status.Load.RunRef == "" {
+		return true
+	}
+	resp, err := r.plugins().StopLoad(ctx, driver, &pluginv1.StopRequest{RunRef: trial.Status.Load.RunRef})
+	if err != nil {
+		r.pluginSkipped(ctx, trial, "LoadStop", driver, err)
+		return true
+	}
+	if m := resp.GetMetrics(); len(m) > 0 {
+		metrics := make(map[string]string, len(m))
+		for k, v := range m {
+			metrics[k] = strconv.FormatFloat(v, 'g', -1, 64)
+		}
+		trial.Status.Load.Metrics = metrics
+	}
+	return resp.GetOk()
+}
+
+// assignments renders the trial's resolved config point for target.Apply, pairing each
+// dimension value with the target config path the study mapped it to. Path defaults to
+// the dimension name, preserving the "names are target paths" convention (§8, G4).
+func assignments(tc trialContext, trial *v1alpha1.Trial) []*pluginv1.DimensionAssignment {
+	if len(trial.Spec.Dimensions) == 0 {
+		return nil
+	}
+	// Index the study's declared dimensions so each assignment carries its mapping.
+	declared := map[string]*v1alpha1.Dimension{}
+	if tc.study != nil {
+		for i := range tc.study.Spec.Space.Dimensions {
+			d := &tc.study.Spec.Space.Dimensions[i]
+			declared[d.Name] = d
+		}
+	}
+	names := make([]string, 0, len(trial.Spec.Dimensions))
+	for name := range trial.Spec.Dimensions {
+		names = append(names, name)
+	}
+	sort.Strings(names) // stable request ordering for reproducible plugin behaviour
+	out := make([]*pluginv1.DimensionAssignment, 0, len(names))
+	for _, name := range names {
+		a := &pluginv1.DimensionAssignment{Name: name, Value: trial.Spec.Dimensions[name], Path: name}
+		if d, ok := declared[name]; ok {
+			if d.Path != "" {
+				a.Path = d.Path
+			}
+			if d.Mapping != nil {
+				a.MappingJson = d.Mapping.Raw
+			}
+		}
+		out = append(out, a)
+	}
+	return out
 }
 
 // pluginSkipped records that a plugin call could not be made (typically because the
@@ -357,10 +549,10 @@ func (r *TrialReconciler) collectAndPersist(ctx context.Context, pl resolvedPlug
 			values = append(values, store.SLIValueRecord{
 				TrialID:     trialID,
 				Name:        sli.Name,
-				Provider:    sli.Provider,
+				Provider:    sliProvider(sli),
 				Class:       sli.Class,
 				Value:       c.value,
-				Query:       sli.Query,
+				Query:       sliQueryEvidence(sli),
 				EvaluatedAt: time.Now().UTC(),
 			})
 		}
@@ -382,10 +574,15 @@ type collectedSLI struct {
 	ok    bool
 }
 
-// collectSLIs groups the study's provider-backed SLIs by provider, calls each
-// provider's Collect over the trial's measurement window, and returns the values by
-// SLI name. The derived class is computed in-core, not via a provider (§5.1); derived
-// evaluation is TODO(m1), so those SLIs are collected as zero for now.
+// collectSLIs resolves every SLI the study declares, from whichever of the three
+// sources it names (docs/GENERALIZATION.md G6):
+//
+//   - driver — the load driver's summary metrics, already on status after Stop. No
+//     plugin call, and no assumption about what the driver measures.
+//   - from   — a provider plugin, called once per provider over [t1, t2] with the
+//     study's provider-native config block passed through verbatim.
+//   - derived — computed in-core from the values above. TODO(m1): expression
+//     evaluation; these resolve as not-ok until then.
 func (r *TrialReconciler) collectSLIs(ctx context.Context, study *v1alpha1.Study, trial *v1alpha1.Trial) map[string]collectedSLI {
 	out := map[string]collectedSLI{}
 	window := &pluginv1.Window{
@@ -396,15 +593,28 @@ func (r *TrialReconciler) collectSLIs(ctx context.Context, study *v1alpha1.Study
 	// provider name -> the SLIQuery list to ask it for.
 	byProvider := map[string][]*pluginv1.SLIQuery{}
 	for _, sli := range study.Spec.SLIs {
-		if sli.Provider == "" || sli.Class == "derived" {
-			continue // derived SLIs are in-core (TODO(m1)); unprovidered SLIs skipped
+		switch {
+		case sli.Driver != nil:
+			raw, ok := trial.Status.Load.Metrics[sli.Driver.Metric]
+			if !ok {
+				logf.FromContext(ctx).Info("load driver reported no such metric",
+					"sli", sli.Name, "metric", sli.Driver.Metric)
+				continue
+			}
+			v, err := strconv.ParseFloat(raw, 64)
+			if err != nil {
+				logf.FromContext(ctx).Error(err, "parse driver metric", "sli", sli.Name, "raw", raw)
+				continue
+			}
+			out[sli.Name] = collectedSLI{value: v, ok: true}
+
+		case sli.From != nil && sli.From.Plugin != "":
+			byProvider[sli.From.Plugin] = append(byProvider[sli.From.Plugin], &pluginv1.SLIQuery{
+				Name:       sli.Name,
+				SliClass:   sli.Class,
+				ConfigJson: rawExtension(sli.From.Config),
+			})
 		}
-		byProvider[sli.Provider] = append(byProvider[sli.Provider], &pluginv1.SLIQuery{
-			Name:     sli.Name,
-			SliClass: sli.Class,
-			Query:    sli.Query,
-			Expr:     sli.Expr,
-		})
 	}
 
 	for provider, queries := range byProvider {
@@ -425,6 +635,43 @@ func (r *TrialReconciler) collectSLIs(ctx context.Context, study *v1alpha1.Study
 	return out
 }
 
+// sliProvider names the source recorded alongside an SLI value in the results DB.
+func sliProvider(sli v1alpha1.SLISpec) string {
+	switch {
+	case sli.From != nil:
+		return sli.From.Plugin
+	case sli.Driver != nil:
+		return "driver"
+	case sli.Derived != nil:
+		return "derived"
+	default:
+		return ""
+	}
+}
+
+// sliQueryEvidence is the query text recorded with an SLI value: the provider config
+// block, the driver metric key, or the derived expression.
+func sliQueryEvidence(sli v1alpha1.SLISpec) string {
+	switch {
+	case sli.From != nil && sli.From.Config != nil:
+		return string(sli.From.Config.Raw)
+	case sli.Driver != nil:
+		return sli.Driver.Metric
+	case sli.Derived != nil:
+		return sli.Derived.Expr
+	default:
+		return ""
+	}
+}
+
+// rawExtension returns a RawExtension's bytes, or nil.
+func rawExtension(ext *runtime.RawExtension) []byte {
+	if ext == nil {
+		return nil
+	}
+	return ext.Raw
+}
+
 // rawConfig returns the trial's config JSON, or nil.
 func rawConfig(trial *v1alpha1.Trial) []byte {
 	if trial.Spec.Config != nil {
@@ -433,19 +680,28 @@ func rawConfig(trial *v1alpha1.Trial) []byte {
 	return nil
 }
 
-// workloadJSON serializes the resolved workload block the load driver replays.
-func workloadJSON(study *v1alpha1.Study, trial *v1alpha1.Trial) []byte {
-	if study == nil {
+// workloadJSON serializes the resolved workload block the load driver runs, with the
+// trial's fidelity overlay attached so a screening rep can run the same driver at a
+// lower intensity than a validation rep. The driver owns the merge: only it knows
+// which of its own fields the overlay may touch.
+func workloadJSON(tc trialContext, trial *v1alpha1.Trial) []byte {
+	if tc.workload == nil {
 		return nil
 	}
-	for i := range study.Spec.Workloads {
-		if study.Spec.Workloads[i].Name == trial.Spec.Workload {
-			if b, err := json.Marshal(study.Spec.Workloads[i]); err == nil {
-				return b
-			}
-		}
+	payload := struct {
+		v1alpha1.Workload `json:",inline"`
+		Fidelity          v1alpha1.FidelitySpec `json:"fidelity,omitempty"`
+		TrialID           string                `json:"trialID,omitempty"`
+	}{
+		Workload: *tc.workload,
+		Fidelity: trial.Spec.Fidelity,
+		TrialID:  string(trial.UID),
 	}
-	return nil
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return nil
+	}
+	return b
 }
 
 // timeRFC3339 renders a metav1.Time as RFC3339, or "" if nil.

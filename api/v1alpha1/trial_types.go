@@ -69,15 +69,19 @@ type TrialSpec struct {
 	Scenario string `json:"scenario,omitempty"`
 }
 
-// FidelitySpec is the duration/rate/rep dial that separates screening from
-// validation trials (DESIGN.md §7 fidelity note).
+// FidelitySpec is the dial that separates cheap screening trials from expensive
+// validation trials (DESIGN.md §7 fidelity note). Durations are core semantics;
+// intensity is driver-specific, so it rides along as a config overlay.
 type FidelitySpec struct {
 	// +optional
 	Warmup metav1.Duration `json:"warmup,omitempty"`
 	// +optional
 	Measure metav1.Duration `json:"measure,omitempty"`
+	// DriverConfig overlays the workload's driver config for this trial — a lower
+	// request rate, a smaller scale factor, fewer client threads. Merged over
+	// Workload.Driver.Config; driver-defined, opaque to the core.
 	// +optional
-	ReplayRate int64 `json:"replayRate,omitempty"`
+	DriverConfig *runtime.RawExtension `json:"driverConfig,omitempty"`
 }
 
 // TrialTimeline records the phase boundary timestamps; SLIs are evaluated strictly
@@ -87,12 +91,33 @@ type TrialTimeline struct {
 	Applied *metav1.Time `json:"applied,omitempty"`
 	// +optional
 	Ready *metav1.Time `json:"ready,omitempty"`
+	// LoadStarted is when the load driver's run began. Warmup is measured from here,
+	// not from Ready, so a slow driver start does not eat the warmup.
+	// +optional
+	LoadStarted *metav1.Time `json:"loadStarted,omitempty"`
 	// +optional
 	T1 *metav1.Time `json:"t1,omitempty"`
 	// +optional
 	T2 *metav1.Time `json:"t2,omitempty"`
 	// +optional
 	Drained *metav1.Time `json:"drained,omitempty"`
+}
+
+// LoadRunStatus is the observed state of the trial's load-driver run.
+type LoadRunStatus struct {
+	// RunRef is the opaque handle the driver returned from Start; the core hands it
+	// back on every Progress/Stop call and never assumes its shape.
+	// +optional
+	RunRef string `json:"runRef,omitempty"`
+	// Metrics are the driver's summary metrics from Stop, as decimal strings (CRD
+	// float avoidance). SLIs with a `driver` source read from this map.
+	// +optional
+	Metrics map[string]string `json:"metrics,omitempty"`
+	// Aborted records that the driver's own abort policy fired.
+	// +optional
+	Aborted bool `json:"aborted,omitempty"`
+	// +optional
+	AbortReason string `json:"abortReason,omitempty"`
 }
 
 // SLIResult is a status-level summary of one SLI; full evidence lives in the DB.
@@ -128,6 +153,8 @@ type TrialStatus struct {
 	// Environment fingerprint (k8s version, plugin digests, images) — §9.
 	// +optional
 	Fingerprint *runtime.RawExtension `json:"fingerprint,omitempty"`
+	// +optional
+	Load LoadRunStatus `json:"load,omitempty"`
 	// +optional
 	SLIs []SLIResult `json:"slis,omitempty"`
 	// +optional

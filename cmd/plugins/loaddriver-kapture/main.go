@@ -19,10 +19,14 @@ limitations under the License.
 // shards across the spokes of selected cells, watches the per-cell rollup, and
 // aggregates the shard run reports on Stop.
 //
-// M0 is a skeleton: Plan derives the shard count from the workload, Start synthesizes
-// a run reference, Watch streams a few synthetic progress events then a terminal one,
-// and Stop returns a zeroed RunReport. TODO(m1) markers flag where the real
-// CaptureLoadTest lifecycle will land.
+// This plugin owns the *replay* vocabulary — engine, rate mode, cell distribution,
+// abort policy. None of it appears in the Study CRD any more: parallax hands the
+// driver an opaque config block and this file is where it acquires meaning
+// (docs/GENERALIZATION.md G1).
+//
+// M0 is a skeleton: Plan derives the shard count, Start synthesizes a run reference,
+// Progress reports synthetic counters, and Stop returns them as summary metrics.
+// TODO(m1) markers flag where the real CaptureLoadTest lifecycle will land.
 package main
 
 import (
@@ -31,7 +35,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"time"
 
 	"github.com/aburan28/parallax/pkg/plugin"
 	pluginv1 "github.com/aburan28/parallax/proto/plugin/v1"
@@ -40,13 +43,24 @@ import (
 // logger writes to stderr only; stdout is reserved for the SDK handshake line.
 var logger = log.New(os.Stderr, "loaddriver-kapture: ", log.LstdFlags|log.Lmsgprefix)
 
-// watchStepInterval paces the synthetic progress stream so Watch behaves like a real
-// streaming RPC. It is honored against the stream context so cancellation is prompt.
-const watchStepInterval = 250 * time.Millisecond
-
-// workload mirrors the CaptureLoadTest.spec fields parallax passes through (DESIGN.md
-// §8, App. A.2). Only the fields M0 needs to plan the run are modeled.
+// workload is the block parallax passes to Start/Plan: the study's Workload, with the
+// driver's own config nested under `driver.config`.
 type workload struct {
+	Name   string `json:"name"`
+	Driver struct {
+		Plugin string       `json:"plugin"`
+		Config driverConfig `json:"config"`
+	} `json:"driver"`
+	DatasetRef *struct {
+		Name string `json:"name"`
+	} `json:"datasetRef"`
+	TrialID string `json:"trialID"`
+}
+
+// driverConfig mirrors the CaptureLoadTest.spec fields this driver understands
+// (DESIGN.md App. A.2). This is the schema the plugin publishes via Describe() and
+// the study writes under workloads[].driver.config.
+type driverConfig struct {
 	Engine       string `json:"engine"`
 	Distribution struct {
 		Cells                []string `json:"cells"`
@@ -58,7 +72,13 @@ type workload struct {
 	Rate struct {
 		Mode              string  `json:"mode"`
 		RequestsPerSecond float64 `json:"requestsPerSecond"`
+		TimeScale         string  `json:"timeScale"`
 	} `json:"rate"`
+	Abort struct {
+		MaxDuration       string  `json:"maxDuration"`
+		ErrorPercent      float64 `json:"errorPercent"`
+		MinSampleRequests int64   `json:"minSampleRequests"`
+	} `json:"abort"`
 }
 
 // parseWorkload decodes the workload JSON. An empty body yields a zero workload,
@@ -77,11 +97,12 @@ func parseWorkload(raw []byte) (*workload, error) {
 // totalShards derives the number of replay shards from the distribution: one shard
 // per worker per spoke. Missing/zero values default to a single shard.
 func (w *workload) totalShards() int64 {
-	spokes := w.Distribution.MaxSpokes
+	d := w.Driver.Config.Distribution
+	spokes := d.MaxSpokes
 	if spokes <= 0 {
 		spokes = 1
 	}
-	workers := w.Distribution.WorkersPerSpoke
+	workers := d.WorkersPerSpoke
 	if workers <= 0 {
 		workers = 1
 	}
@@ -89,10 +110,10 @@ func (w *workload) totalShards() int64 {
 }
 
 func (w *workload) engineOrDefault() string {
-	if w.Engine == "" {
-		return "builtin"
+	if e := w.Driver.Config.Engine; e != "" {
+		return e
 	}
-	return w.Engine
+	return "builtin"
 }
 
 // server implements the LoadDriver service for kapture.
@@ -108,13 +129,13 @@ func (s *server) Plan(_ context.Context, req *pluginv1.PlanRequest) (*pluginv1.P
 	}
 	shards := w.totalShards()
 	return &pluginv1.PlanResponse{
-		Ok:          true,
-		Detail:      fmt.Sprintf("loaddriver-kapture: planned %d replay shard(s) with engine %q", shards, w.engineOrDefault()),
-		TotalShards: shards,
+		Ok:     true,
+		Detail: fmt.Sprintf("loaddriver-kapture: planned %d replay shard(s) with engine %q", shards, w.engineOrDefault()),
+		Plan:   map[string]float64{"total_shards": float64(shards)},
 	}, nil
 }
 
-// Start begins a load run and returns an opaque handle for Watch/Stop.
+// Start begins a load run and returns an opaque handle for Progress/Stop.
 func (s *server) Start(_ context.Context, req *pluginv1.StartRequest) (*pluginv1.StartResponse, error) {
 	// TODO(m1): compose and create a CaptureLoadTest CR for this trial (dataset, rate,
 	// distribution, abort policy) and return its namespace/name as the run_ref.
@@ -130,55 +151,46 @@ func (s *server) Start(_ context.Context, req *pluginv1.StartRequest) (*pluginv1
 	}, nil
 }
 
-// Watch streams progress until the run terminates. In M0 it emits a few synthetic
-// progress events followed by a terminal event.
-func (s *server) Watch(req *pluginv1.WatchRequest, stream pluginv1.LoadDriver_WatchServer) error {
-	runRef := req.GetRunRef()
-	if runRef == "" {
-		return fmt.Errorf("loaddriver-kapture: Watch requires a run_ref")
+// Progress reports how the run is going. A replay is a continuous workload, so it
+// never reports done: the study's measurement window closes it.
+func (s *server) Progress(_ context.Context, req *pluginv1.ProgressRequest) (*pluginv1.ProgressResponse, error) {
+	if req.GetRunRef() == "" {
+		return nil, fmt.Errorf("loaddriver-kapture: Progress requires a run_ref")
 	}
-	ctx := stream.Context()
-
-	// TODO(m1): replace synthetic progress with a watch on CaptureLoadTest.status
-	// per-cell rollups (sent/failed counts, achieved RPS, abort-policy state).
-	progress := []*pluginv1.WatchEvent{
-		{Phase: "Warmup", SentRequests: 0, FailedRequests: 0, AchievedRps: 0},
-		{Phase: "Running", SentRequests: 5000, FailedRequests: 3, AchievedRps: 1000},
-		{Phase: "Running", SentRequests: 15000, FailedRequests: 7, AchievedRps: 1000},
-	}
-	for _, ev := range progress {
-		if err := stream.Send(ev); err != nil {
-			return fmt.Errorf("loaddriver-kapture: send watch event: %w", err)
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(watchStepInterval):
-		}
-	}
-
-	terminal := &pluginv1.WatchEvent{
-		Phase:          "Completed",
-		SentRequests:   15000,
-		FailedRequests: 7,
-		AchievedRps:    1000,
-		Aborted:        false,
-	}
-	if err := stream.Send(terminal); err != nil {
-		return fmt.Errorf("loaddriver-kapture: send terminal watch event: %w", err)
-	}
-	return nil
+	// TODO(m1): read CaptureLoadTest.status per-cell rollups (sent/failed counts,
+	// achieved RPS) and surface the abort-policy state as Aborted/AbortReason.
+	return &pluginv1.ProgressResponse{
+		Phase: "Running",
+		Metrics: map[string]float64{
+			"sent_requests":   0,
+			"failed_requests": 0,
+			"achieved_rps":    0,
+		},
+	}, nil
 }
 
-// Stop ends the run and returns an aggregated run report.
+// Stop ends the run and returns its aggregated metrics. The metric names here are
+// this driver's published contract: studies reference them from `slis[].driver`.
 func (s *server) Stop(_ context.Context, req *pluginv1.StopRequest) (*pluginv1.StopResponse, error) {
 	// TODO(m1): read the final CaptureLoadTest.status cell rollups and aggregate the
-	// per-shard TrafficReplay run reports (sent/failed/filtered, latency percentiles)
-	// into this RunReport. Zeros are honest placeholders until then.
+	// per-shard TrafficReplay run reports into these metrics. Zeros are honest
+	// placeholders until then.
 	logger.Printf("stop run %s", req.GetRunRef())
 	return &pluginv1.StopResponse{
-		Ok:     true,
-		Report: &pluginv1.RunReport{},
+		Ok: true,
+		Metrics: map[string]float64{
+			"total_requests":    0,
+			"sent_requests":     0,
+			"failed_requests":   0,
+			"filtered_requests": 0,
+			"duration_ms":       0,
+			"achieved_rps":      0,
+			"mean_latency_ms":   0,
+			"p50_latency_ms":    0,
+			"p95_latency_ms":    0,
+			"p99_latency_ms":    0,
+		},
+		Detail: "loaddriver-kapture: zeroed run report (M0 skeleton)",
 	}, nil
 }
 

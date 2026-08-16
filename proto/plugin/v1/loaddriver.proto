@@ -1,5 +1,12 @@
 // LoadDriver plugins generate load against the target (DESIGN.md §5.1).
-// loaddriver-kapture composes a CaptureLoadTest and watches its rollups.
+//
+// The ABI is workload-agnostic: parallax knows only that a driver starts something,
+// reports progress, and stops with a set of metrics. What "load" means is entirely
+// the driver's business — replayed HTTP traffic (loaddriver-kapture composes a
+// CaptureLoadTest), a synthetic request generator, a submitted batch job, a query
+// harness, an eval suite. Nothing request/response-shaped appears below
+// (docs/GENERALIZATION.md G1, G5).
+//
 // Swap boundary: trial.
 syntax = "proto3";
 
@@ -8,21 +15,28 @@ package parallax.plugin.v1;
 option go_package = "github.com/aburan28/parallax/proto/plugin/v1;pluginv1";
 
 service LoadDriver {
+  // Plan validates a workload before any trial is spent and reports what it would do.
   rpc Plan(PlanRequest) returns (PlanResponse);
+  // Start begins the run and returns an opaque handle for Progress/Stop.
   rpc Start(StartRequest) returns (StartResponse);
-  // Watch streams progress + abort-policy state until the run terminates.
-  rpc Watch(WatchRequest) returns (stream WatchEvent);
+  // Progress polls a running workload. Unary rather than streaming so a reconcile
+  // loop can consume it: one call per reconcile, no cross-reconcile stream state.
+  rpc Progress(ProgressRequest) returns (ProgressResponse);
+  // Stop ends the run and returns its summary metrics.
   rpc Stop(StopRequest) returns (StopResponse);
 }
 
 message PlanRequest {
+  // The resolved workload block: driver config, dataset reference, window durations.
   bytes workload_json = 1;
 }
 
 message PlanResponse {
   bool ok = 1;
   string detail = 2;
-  int64 total_shards = 3;
+  // Driver-defined plan facts for the trial record (shard count, job parallelism,
+  // estimated duration, ...). Purely informational to the core.
+  map<string, double> plan = 3;
 }
 
 message StartRequest {
@@ -31,44 +45,45 @@ message StartRequest {
 }
 
 message StartResponse {
-  // Opaque handle for Watch/Stop (e.g. the CaptureLoadTest namespace/name).
+  // Opaque handle the driver chooses (a CaptureLoadTest namespace/name, a Job UID, a
+  // local run id). The host persists it and hands it back on Progress/Stop — drivers
+  // are never required to key runs by trial id.
   string run_ref = 1;
   string detail = 2;
 }
 
-message WatchRequest {
+message ProgressRequest {
   string run_ref = 1;
 }
 
-message WatchEvent {
+message ProgressResponse {
+  // Driver-defined phase label, surfaced in trial events.
   string phase = 1;
-  int64 sent_requests = 2;
-  int64 failed_requests = 3;
-  double achieved_rps = 4;
-  bool aborted = 5;
-  string abort_reason = 6;
+  // Driver-defined progress counters: sent_requests / failed_requests for a request
+  // driver, records_processed / splits_remaining for a batch driver, and so on.
+  map<string, double> metrics = 2;
+  // Done reports that the workload has run to completion. For workloads declaring
+  // completion=driver this closes the measurement window.
+  bool done = 3;
+  // Aborted reports that the driver's own abort policy fired (error rate, duration
+  // cap, target-safety trip). The trial terminates as Aborted and is recorded.
+  bool aborted = 4;
+  string abort_reason = 5;
 }
 
 message StopRequest {
   string run_ref = 1;
 }
 
-// RunReport mirrors kapture's TrafficReplay run-report fields (DESIGN.md App. A.2),
-// aggregated across shards.
-message RunReport {
-  int64 total_requests = 1;
-  int64 sent_requests = 2;
-  int64 failed_requests = 3;
-  int64 filtered_requests = 4;
-  int64 duration_ms = 5;
-  double achieved_rps = 6;
-  double mean_latency_ms = 7;
-  double p50_latency_ms = 8;
-  double p95_latency_ms = 9;
-  double p99_latency_ms = 10;
-}
-
 message StopResponse {
   bool ok = 1;
-  RunReport report = 2;
+  // Summary metrics for the whole run, keyed by driver-defined metric name. This is
+  // the surface a study's `slis[].driver` entries read, so these names are the
+  // driver's published contract: a request driver publishes sent_requests /
+  // p99_latency_ms, a batch driver publishes records_processed / job_duration_ms.
+  map<string, double> metrics = 2;
+  // Full driver-native report, retained as a trial artifact and available to
+  // exporters. Not interpreted by the core.
+  bytes report_json = 3;
+  string detail = 4;
 }

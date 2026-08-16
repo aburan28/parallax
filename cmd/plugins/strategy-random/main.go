@@ -14,26 +14,24 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Command strategy-random is the first-party "random" strategy plugin. It performs
-// uniform random search: Init parses the search space and seeds the RNG, and each
-// Ask draws a uniformly random value from every enumerated dimension.
+// Command strategy-random is the first-party "random" strategy plugin: uniform
+// random search, the permanent sanity floor every other strategy is measured
+// against (DESIGN.md §14).
 //
-// M0: Init and Ask are real; Tell and Report remain unimplemented via the
-// embedded UnimplementedStrategyServer (random search ignores feedback).
+// Ask is stateless and deterministic. The RNG is seeded from (run seed, number of
+// points already taken) rather than carried across calls, so a hot-reloaded plugin
+// resumes the identical sequence and one process serves concurrent studies without
+// their draws interfering.
 package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"math/rand"
 	"os"
 	"sort"
-	"sync"
-	"time"
+	"strconv"
 
 	"github.com/aburan28/parallax/pkg/plugin"
 	pluginv1 "github.com/aburan28/parallax/proto/plugin/v1"
@@ -42,111 +40,154 @@ import (
 // pluginName is the discovery/socket name (host looks for parallax-strategy-random).
 const pluginName = "random"
 
-// randomDim is one enumerated dimension of the search space. This is a tolerant
-// subset of the DESIGN.md §8 space block: a dimension is usable only when it has a
-// key (path, else name) and a non-empty value list.
+// drawAttemptsPerPoint bounds rejection sampling when the space is nearly exhausted:
+// without it, a small space with most points taken would spin.
+const drawAttemptsPerPoint = 16
+
+// randomDim is one dimension of the search space. Only the flavours a random draw
+// can sample are modeled; assignments are keyed by dimension **name** (a `path` is
+// the target's business, not the search's).
 type randomDim struct {
-	Name   string   `json:"name"`
-	Path   string   `json:"path"`
-	Values []string `json:"values"`
+	Name        string `json:"name"`
+	Categorical *struct {
+		Values []string `json:"values"`
+	} `json:"categorical"`
+	Int *struct {
+		Min int64 `json:"min"`
+		Max int64 `json:"max"`
+	} `json:"int"`
+	Float *struct {
+		Min string `json:"min"`
+		Max string `json:"max"`
+	} `json:"float"`
 }
 
-// randomSpace is the parsed search-space document.
+// draw picks one value for this dimension, or "" (skip) when the dimension carries
+// nothing samplable.
+func (d randomDim) draw(rng *rand.Rand) (string, bool) {
+	switch {
+	case d.Categorical != nil && len(d.Categorical.Values) > 0:
+		return d.Categorical.Values[rng.Intn(len(d.Categorical.Values))], true
+	case d.Int != nil && d.Int.Max >= d.Int.Min:
+		span := d.Int.Max - d.Int.Min + 1
+		return strconv.FormatInt(d.Int.Min+rng.Int63n(span), 10), true
+	case d.Float != nil:
+		lo, errLo := strconv.ParseFloat(d.Float.Min, 64)
+		hi, errHi := strconv.ParseFloat(d.Float.Max, 64)
+		if errLo != nil || errHi != nil || hi < lo {
+			return "", false
+		}
+		return strconv.FormatFloat(lo+rng.Float64()*(hi-lo), 'g', -1, 64), true
+	default:
+		return "", false
+	}
+}
+
 type randomSpace struct {
 	Dimensions []randomDim `json:"dimensions"`
 }
 
-// server implements the Strategy service. Init/Ask are real; Tell/Report are
-// left unimplemented for M0 via the embedded UnimplementedStrategyServer.
+// askConfig is this strategy's config block from the study's space.strategy.config.
+type askConfig struct {
+	// Points caps how many distinct config points the search covers. It counts every
+	// point the host reports as taken — the study's baseline included — so it lines
+	// up with budgets.maxTrials rather than competing with it. 0 = unbounded.
+	Points int `json:"points"`
+}
+
+// server implements the Strategy service.
 type server struct {
 	pluginv1.UnimplementedStrategyServer
-
-	mu   sync.Mutex
-	dims []randomDim
-	rng  *rand.Rand
 }
 
-// Init parses the search space and seeds the RNG (falling back to a time seed
-// when the host supplies seed 0).
-func (s *server) Init(_ context.Context, req *pluginv1.InitRequest) (*pluginv1.InitResponse, error) {
-	var space randomSpace
-	raw := req.GetSpaceJson()
-	if len(raw) > 0 {
-		if err := json.Unmarshal(raw, &space); err != nil {
-			return &pluginv1.InitResponse{Ok: false, Detail: fmt.Sprintf("random: parse space_json: %v", err)}, nil
-		}
-	}
-	seed := req.GetSeed()
-	if seed == 0 {
-		seed = time.Now().UnixNano()
-	}
-
-	// Keep only usable dimensions so Ask stays branch-free.
-	usable := make([]randomDim, 0, len(space.Dimensions))
-	for _, d := range space.Dimensions {
-		if d.Path == "" && d.Name == "" {
-			continue
-		}
-		if len(d.Values) == 0 {
-			continue
-		}
-		usable = append(usable, d)
-	}
-
-	s.mu.Lock()
-	s.dims = usable
-	s.rng = rand.New(rand.NewSource(seed))
-	s.mu.Unlock()
-
-	return &pluginv1.InitResponse{Ok: true, Detail: fmt.Sprintf("random: %d dimension(s), seed %d", len(usable), seed)}, nil
-}
-
-// Ask draws count random suggestions, one uniform pick per dimension.
+// Ask draws up to count fresh points, skipping any the host reports as taken.
 func (s *server) Ask(_ context.Context, req *pluginv1.AskRequest) (*pluginv1.AskResponse, error) {
+	var space randomSpace
+	if raw := req.GetSpaceJson(); len(raw) > 0 {
+		if err := json.Unmarshal(raw, &space); err != nil {
+			return nil, fmt.Errorf("random: parse space_json: %w", err)
+		}
+	}
+	var cfg askConfig
+	if raw := req.GetConfigJson(); len(raw) > 0 {
+		if err := json.Unmarshal(raw, &cfg); err != nil {
+			return nil, fmt.Errorf("random: parse config_json: %w", err)
+		}
+	}
 	n := int(req.GetCount())
 	if n <= 0 {
 		n = 1
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 
-	if s.rng == nil { // Ask before Init: use a deterministic default RNG.
-		s.rng = rand.New(rand.NewSource(1))
+	taken := map[string]bool{}
+	for _, o := range req.GetObservations() {
+		taken[o.GetConfigHash()] = true
 	}
+	for _, h := range req.GetPending() {
+		taken[h] = true
+	}
+
+	// The point budget is counted against what already exists, so a resumed study
+	// does not restart the count.
+	if cfg.Points > 0 && len(taken) >= cfg.Points {
+		return &pluginv1.AskResponse{
+			Done:   true,
+			Detail: fmt.Sprintf("random: point budget %d reached", cfg.Points),
+		}, nil
+	}
+	if cfg.Points > 0 && len(taken)+n > cfg.Points {
+		n = cfg.Points - len(taken)
+	}
+
+	// Seeding from (run seed, points taken) makes the draw a pure function of the
+	// history: replaying a run reproduces the same sequence.
+	rng := rand.New(rand.NewSource(req.GetSeed() + int64(len(taken))))
+	dims := usableDims(space.Dimensions)
 
 	out := make([]*pluginv1.Suggestion, 0, n)
-	for i := 0; i < n; i++ {
-		assignments := make(map[string]string, len(s.dims))
-		for _, d := range s.dims {
-			key := d.Path
-			if key == "" {
-				key = d.Name
+	drawn := map[string]bool{}
+	for i := 0; i < n*drawAttemptsPerPoint && len(out) < n; i++ {
+		assignments := map[string]string{}
+		for _, d := range dims {
+			if v, ok := d.draw(rng); ok {
+				assignments[d.Name] = v
 			}
-			assignments[key] = d.Values[s.rng.Intn(len(d.Values))]
 		}
-		out = append(out, &pluginv1.Suggestion{
-			ConfigHash:  configHash(assignments),
-			Assignments: assignments,
-		})
+		if len(assignments) == 0 {
+			break // nothing samplable in this space
+		}
+		h := plugin.CanonicalHash(assignments)
+		if taken[h] || drawn[h] {
+			continue // collision: try again
+		}
+		drawn[h] = true
+		out = append(out, &pluginv1.Suggestion{ConfigHash: h, Assignments: assignments})
 	}
-	return &pluginv1.AskResponse{Suggestions: out}, nil
+
+	// An empty draw means the space is effectively exhausted — every attempt collided
+	// with a point already taken.
+	return &pluginv1.AskResponse{
+		Suggestions: out,
+		Done:        len(out) == 0,
+		Detail:      fmt.Sprintf("random: drew %d point(s) over %d dimension(s)", len(out), len(dims)),
+	}, nil
 }
 
-// configHash is a stable content hash of an assignment map (order-independent).
-func configHash(assignments map[string]string) string {
-	keys := make([]string, 0, len(assignments))
-	for k := range assignments {
-		keys = append(keys, k)
+// usableDims keeps only named, samplable dimensions, in a stable order so the draw
+// sequence does not depend on map iteration or document ordering quirks.
+func usableDims(dims []randomDim) []randomDim {
+	out := make([]randomDim, 0, len(dims))
+	for _, d := range dims {
+		if d.Name == "" {
+			continue
+		}
+		if d.Categorical == nil && d.Int == nil && d.Float == nil {
+			continue
+		}
+		out = append(out, d)
 	}
-	sort.Strings(keys)
-	h := sha256.New()
-	for _, k := range keys {
-		_, _ = io.WriteString(h, k)
-		_, _ = io.WriteString(h, "=")
-		_, _ = io.WriteString(h, assignments[k])
-		_, _ = io.WriteString(h, ";")
-	}
-	return hex.EncodeToString(h.Sum(nil))[:16]
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
 }
 
 func main() {

@@ -34,6 +34,7 @@ type trialPlugins interface {
 	Apply(ctx context.Context, target string, req *pluginv1.ApplyRequest) (*pluginv1.ApplyResponse, error)
 	Ready(ctx context.Context, target string, req *pluginv1.ReadyRequest) (*pluginv1.ReadyResponse, error)
 	StartLoad(ctx context.Context, driver string, req *pluginv1.StartRequest) (*pluginv1.StartResponse, error)
+	Progress(ctx context.Context, driver string, req *pluginv1.ProgressRequest) (*pluginv1.ProgressResponse, error)
 	StopLoad(ctx context.Context, driver string, req *pluginv1.StopRequest) (*pluginv1.StopResponse, error)
 	Collect(ctx context.Context, provider string, req *pluginv1.CollectRequest) (*pluginv1.CollectResponse, error)
 }
@@ -67,6 +68,14 @@ func (h hostPlugins) StartLoad(ctx context.Context, driver string, req *pluginv1
 		return nil, err
 	}
 	return pluginv1.NewLoadDriverClient(conn).Start(ctx, req)
+}
+
+func (h hostPlugins) Progress(ctx context.Context, driver string, req *pluginv1.ProgressRequest) (*pluginv1.ProgressResponse, error) {
+	conn, err := h.dial(driver)
+	if err != nil {
+		return nil, err
+	}
+	return pluginv1.NewLoadDriverClient(conn).Progress(ctx, req)
 }
 
 func (h hostPlugins) StopLoad(ctx context.Context, driver string, req *pluginv1.StopRequest) (*pluginv1.StopResponse, error) {

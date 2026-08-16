@@ -32,6 +32,7 @@ import (
 	"strings"
 
 	"github.com/aburan28/parallax/api/v1alpha1"
+	"github.com/aburan28/parallax/pkg/plugin"
 )
 
 // Kind discriminates the three dimension flavours.
@@ -161,24 +162,11 @@ func New(dims []v1alpha1.Dimension) (*Space, error) {
 	return out, nil
 }
 
-// CanonicalHash returns the hex SHA-256 over the assignment map rendered as
-// sorted "k=v;" pairs. It is the stable identity used for trial dedupe/resume
-// (DESIGN.md §14, §15 config_hash).
+// CanonicalHash returns the stable identity of a config point. The definition lives
+// in the public SDK (pkg/plugin) because strategy plugins must compute the identical
+// hash to recognise the points the host tells them are already taken.
 func CanonicalHash(assignments map[string]string) string {
-	keys := make([]string, 0, len(assignments))
-	for k := range assignments {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	var b strings.Builder
-	for _, k := range keys {
-		b.WriteString(k)
-		b.WriteByte('=')
-		b.WriteString(assignments[k])
-		b.WriteByte(';')
-	}
-	sum := sha256.Sum256([]byte(b.String()))
-	return hex.EncodeToString(sum[:])
+	return plugin.CanonicalHash(assignments)
 }
 
 // BaselineHash returns the deterministic config hash of a study's baseline point.

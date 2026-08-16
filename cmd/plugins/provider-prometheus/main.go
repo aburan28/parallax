@@ -120,10 +120,19 @@ func (s *server) Collect(ctx context.Context, req *pluginv1.CollectRequest) (*pl
 
 	resp := &pluginv1.CollectResponse{}
 	for _, q := range req.GetQueries() {
-		raw := q.GetQuery()
-		if strings.TrimSpace(raw) == "" {
-			// A status-scraping SLI (expr-only); not a PromQL query for this backend.
+		// Each provider owns its own query dialect; ours is {"query": <PromQL>}, read
+		// out of the study's slis[].from.config block (docs/GENERALIZATION.md G6).
+		raw, err := promQLFromConfig(q.GetConfigJson())
+		if err != nil {
+			logger.Printf("sli %q: %v", q.GetName(), err)
+			resp.Values = append(resp.Values, &pluginv1.SLIValue{
+				Name: q.GetName(), SliClass: q.GetSliClass(), Ok: false, Detail: err.Error(),
+				EvaluatedAtRfc3339: evalRFC3339,
+			})
 			continue
+		}
+		if strings.TrimSpace(raw) == "" {
+			continue // no query for this backend
 		}
 		// The host leaves the range literal in place; we substitute the measured
 		// duration (e.g. "300s") for the templated window.
@@ -137,7 +146,7 @@ func (s *server) Collect(ctx context.Context, req *pluginv1.CollectRequest) (*pl
 			Name:               q.GetName(),
 			SliClass:           q.GetSliClass(),
 			Value:              value,
-			Query:              promQL,
+			ResolvedQuery:      promQL,
 			EvaluatedAtRfc3339: evalRFC3339,
 			Ok:                 ok,
 			Detail:             detail,

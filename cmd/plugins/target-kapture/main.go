@@ -56,11 +56,11 @@ func (s *server) Apply(_ context.Context, req *pluginv1.ApplyRequest) (*pluginv1
 	// TODO(m1): translate dimensions into a capture-agent Deployment patch (direct
 	// mode owns the pod spec) or Helm values / CR fields (integrated mode), roll it
 	// out, and return the rolled-out object refs for provenance/cleanup.
-	logger.Printf("apply config %s with %d dimension(s)", req.GetConfigHash(), len(req.GetDimensions()))
+	logger.Printf("apply config %s with %d dimension(s)", req.GetConfigHash(), len(req.GetAssignments()))
 	return &pluginv1.ApplyResponse{
 		Applied: true,
 		Detail: fmt.Sprintf("target-kapture: recorded %d dimension(s) for config %s (no rollout in M0)",
-			len(req.GetDimensions()), req.GetConfigHash()),
+			len(req.GetAssignments()), req.GetConfigHash()),
 	}, nil
 }
 
@@ -90,7 +90,11 @@ func (s *server) Reset(_ context.Context, req *pluginv1.ResetRequest) (*pluginv1
 // dimension paths and reports the modes this target supports. It is real in M0:
 // admission uses it to reject unknown dimensions before any trial is spent.
 func (s *server) Contract(_ context.Context, req *pluginv1.ContractRequest) (*pluginv1.ContractResponse, error) {
-	unknown := unknownDimensions(req.GetDimensionNames())
+	names := make([]string, 0, len(req.GetDimensions()))
+	for _, d := range req.GetDimensions() {
+		names = append(names, d.GetName())
+	}
+	unknown := unknownDimensions(names)
 	return &pluginv1.ContractResponse{
 		Ok:                len(unknown) == 0,
 		UnknownDimensions: unknown,

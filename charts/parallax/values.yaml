@@ -69,6 +69,22 @@ securityContext:
   seccompProfile:
     type: RuntimeDefault
 
+# RBAC granted to the manager ServiceAccount. Plugins run as subprocesses of the
+# manager and act with this identity, so anything a plugin touches must be granted
+# here (docs/GENERALIZATION.md G8). Vendor API groups are opt-in: a default install
+# grants none of them.
+rbac:
+  plugins:
+    # Enable when using loaddriver-kapture / target-kapture (capture.gateway.io CRs).
+    kapture: false
+    # Enable for drivers that create Jobs (batch workloads, direct-mode engines).
+    jobs: false
+  # Arbitrary extra policy rules for third-party plugins, e.g.
+  #   - apiGroups: ["serving.knative.dev"]
+  #     resources: ["services"]
+  #     verbs: ["get", "list", "watch", "patch"]
+  extraRules: []
+
 serviceAccount:
   # Create a dedicated ServiceAccount for the operator.
   create: true

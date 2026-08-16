@@ -54,16 +54,6 @@ spec:
             type: object
           spec:
             properties:
-              captureRef:
-                description: CaptureRef names the kapture TrafficCapture this dataset
-                  was recorded from.
-                properties:
-                  name:
-                    minLength: 1
-                    type: string
-                required:
-                - name
-                type: object
               preshard:
                 properties:
                   shards:
@@ -73,8 +63,38 @@ spec:
                 required:
                 - shards
                 type: object
+              source:
+                description: Source describes where the corpus comes from.
+                properties:
+                  config:
+                    description: 'Config is kind-defined: record format, generator
+                      seed, git revision, ...'
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+                  kind:
+                    minLength: 1
+                    type: string
+                  ref:
+                    description: |-
+                      Ref names an in-cluster object for kinds that reference one — e.g. the kapture
+                      TrafficCapture for kind=kapture-capture.
+                    properties:
+                      name:
+                        minLength: 1
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  uri:
+                    description: URI locates the corpus for kinds addressed by location.
+                    type: string
+                required:
+                - kind
+                type: object
               storageRef:
-                description: LocalRef references an object by name in the same namespace.
+                description: |-
+                  StorageRef names the object store holding the corpus. Optional: generator and
+                  git sources are not object-storage backed.
                 properties:
                   name:
                     minLength: 1
@@ -83,8 +103,7 @@ spec:
                 - name
                 type: object
             required:
-            - captureRef
-            - storageRef
+            - source
             type: object
           status:
             properties:
