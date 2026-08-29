@@ -1,6 +1,7 @@
 // The parallax plugin ABI (DESIGN.md §5.2). Every plugin — regardless of kind —
 // serves the Lifecycle service plus exactly one kind service (target, loaddriver,
-// provider, strategy, scenario, exporter) on the same gRPC server over a unix socket.
+// provider, strategy, scenario, exporter, capture) on the same gRPC server over a
+// unix socket.
 //
 // Process contract (§5.2): the host launches the binary with the magic-cookie env
 // PARALLAX_PLUGIN_MAGIC=parallax-plugin and a socket-dir env; the plugin prints
@@ -30,7 +31,7 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-// PluginKind enumerates the six extension seams (DESIGN.md §5.1).
+// PluginKind enumerates the seven extension seams (DESIGN.md §5.1).
 type PluginKind int32
 
 const (
@@ -41,6 +42,7 @@ const (
 	PluginKind_PLUGIN_KIND_STRATEGY    PluginKind = 4
 	PluginKind_PLUGIN_KIND_SCENARIO    PluginKind = 5
 	PluginKind_PLUGIN_KIND_EXPORTER    PluginKind = 6
+	PluginKind_PLUGIN_KIND_CAPTURE     PluginKind = 7
 )
 
 // Enum value maps for PluginKind.
@@ -53,6 +55,7 @@ var (
 		4: "PLUGIN_KIND_STRATEGY",
 		5: "PLUGIN_KIND_SCENARIO",
 		6: "PLUGIN_KIND_EXPORTER",
+		7: "PLUGIN_KIND_CAPTURE",
 	}
 	PluginKind_value = map[string]int32{
 		"PLUGIN_KIND_UNSPECIFIED": 0,
@@ -62,6 +65,7 @@ var (
 		"PLUGIN_KIND_STRATEGY":    4,
 		"PLUGIN_KIND_SCENARIO":    5,
 		"PLUGIN_KIND_EXPORTER":    6,
+		"PLUGIN_KIND_CAPTURE":     7,
 	}
 )
 
@@ -590,7 +594,7 @@ const file_plugin_v1_lifecycle_proto_rawDesc = "" +
 	"\x06detail\x18\x02 \x01(\tR\x06detail\"3\n" +
 	"\fDrainRequest\x12#\n" +
 	"\rgrace_seconds\x18\x01 \x01(\x03R\fgraceSeconds\"\x0f\n" +
-	"\rDrainResponse*\xc5\x01\n" +
+	"\rDrainResponse*\xde\x01\n" +
 	"\n" +
 	"PluginKind\x12\x1b\n" +
 	"\x17PLUGIN_KIND_UNSPECIFIED\x10\x00\x12\x16\n" +
@@ -599,7 +603,8 @@ const file_plugin_v1_lifecycle_proto_rawDesc = "" +
 	"\x14PLUGIN_KIND_PROVIDER\x10\x03\x12\x18\n" +
 	"\x14PLUGIN_KIND_STRATEGY\x10\x04\x12\x18\n" +
 	"\x14PLUGIN_KIND_SCENARIO\x10\x05\x12\x18\n" +
-	"\x14PLUGIN_KIND_EXPORTER\x10\x062\xdb\x02\n" +
+	"\x14PLUGIN_KIND_EXPORTER\x10\x06\x12\x17\n" +
+	"\x13PLUGIN_KIND_CAPTURE\x10\a2\xdb\x02\n" +
 	"\tLifecycle\x12U\n" +
 	"\bDescribe\x12#.parallax.plugin.v1.DescribeRequest\x1a$.parallax.plugin.v1.DescribeResponse\x12X\n" +
 	"\tConfigure\x12$.parallax.plugin.v1.ConfigureRequest\x1a%.parallax.plugin.v1.ConfigureResponse\x12O\n" +

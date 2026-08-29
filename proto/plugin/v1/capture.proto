@@ -1,0 +1,108 @@
+// Capture plugins tap live traffic on the system under test, filter it at the
+// datapath (first-party: in-kernel via eBPF at L7), and forward the matched
+// records to a capture service — e.g. kapture's capture ingest, where they land
+// as versioned datasets replayable by a loaddriver (DESIGN.md §5.1).
+//
+// The ABI is datapath- and protocol-agnostic: parallax knows only that a capture
+// plugin validates a filter spec, starts a session, reports progress, can swap
+// the live filter set, and stops with summary metrics. What a "filter" matches —
+// HTTP methods, gRPC services, header predicates, kernel- vs userspace-stage
+// evaluation — is entirely the plugin's business, published through its config
+// schema (docs/GENERALIZATION.md G1). capture-ebpf owns the eBPF L7 vocabulary.
+//
+// Swap boundary: trial (a running session pins its plugin).
+syntax = "proto3";
+
+package parallax.plugin.v1;
+
+option go_package = "github.com/aburan28/parallax/proto/plugin/v1;pluginv1";
+
+service Capture {
+  // Plan validates and compiles the filter spec without attaching anything, and
+  // reports what the session would do (programs, kernel-map entries, sink).
+  rpc Plan(CapturePlanRequest) returns (CapturePlanResponse);
+  // Start attaches the datapath and begins forwarding matched records to the
+  // capture sink. Returns an opaque handle for Status/UpdateFilters/Stop.
+  rpc Start(CaptureStartRequest) returns (CaptureStartResponse);
+  // Status polls a running session. Unary rather than streaming so a reconcile
+  // loop can consume it: one call per reconcile, no cross-reconcile stream state.
+  rpc Status(CaptureStatusRequest) returns (CaptureStatusResponse);
+  // UpdateFilters replaces the live filter set in place — for eBPF this is a
+  // map swap, no detach — so a session survives a mid-trial filter change.
+  rpc UpdateFilters(CaptureUpdateFiltersRequest) returns (CaptureUpdateFiltersResponse);
+  // Stop detaches the datapath, flushes the sink, and returns summary metrics.
+  rpc Stop(CaptureStopRequest) returns (CaptureStopResponse);
+}
+
+message CapturePlanRequest {
+  // The resolved capture block: attach point, filter set, sink. Plugin-owned
+  // vocabulary, schema-validated via Describe().
+  bytes capture_json = 1;
+}
+
+message CapturePlanResponse {
+  bool ok = 1;
+  string detail = 2;
+  // Plugin-defined plan facts for the trial record (compiled program count,
+  // kernel map entries, userspace-stage filter count, sampling percent, ...).
+  // Purely informational to the core.
+  map<string, double> plan = 3;
+}
+
+message CaptureStartRequest {
+  bytes capture_json = 1;
+  string trial_id = 2;
+}
+
+message CaptureStartResponse {
+  // Opaque handle the plugin chooses (a link/attachment id, a session UUID). The
+  // host persists it and hands it back on Status/UpdateFilters/Stop — plugins
+  // are never required to key sessions by trial id.
+  string session_ref = 1;
+  string detail = 2;
+}
+
+message CaptureStatusRequest {
+  string session_ref = 1;
+}
+
+message CaptureStatusResponse {
+  // Plugin-defined phase label, surfaced in trial events.
+  string phase = 1;
+  // Plugin-defined progress counters: seen_records / matched_records /
+  // forwarded_records / dropped_records for the eBPF plugin, and so on.
+  map<string, double> metrics = 2;
+  // Aborted reports that the session's own abort policy fired (sink unreachable,
+  // datapath detached by the kernel, drop budget exceeded). The trial terminates
+  // as Aborted and is recorded.
+  bool aborted = 3;
+  string abort_reason = 4;
+}
+
+message CaptureUpdateFiltersRequest {
+  string session_ref = 1;
+  // Replacement capture block; only the filter set may change mid-session.
+  bytes capture_json = 2;
+}
+
+message CaptureUpdateFiltersResponse {
+  bool ok = 1;
+  string detail = 2;
+}
+
+message CaptureStopRequest {
+  string session_ref = 1;
+}
+
+message CaptureStopResponse {
+  bool ok = 1;
+  // Summary metrics for the whole session, keyed by plugin-defined metric name.
+  // These names are the plugin's published contract: capture-ebpf publishes
+  // seen_records / matched_records / forwarded_records / dropped_records /
+  // forwarded_bytes / duration_ms.
+  map<string, double> metrics = 2;
+  // Full plugin-native session report, retained as a trial artifact and
+  // available to exporters. Not interpreted by the core.
+  bytes report_json = 3;
+  string detail = 4;
+}

@@ -81,6 +81,25 @@ spec:
 apiVersion: parallax.dev/v1alpha1
 kind: Plugin
 metadata:
+  name: capture-ebpf
+spec:
+  kind: capture
+  image: ghcr.io/aburan28/parallax-capture-ebpf:0.1.0
+  verify:
+    cosign:
+      keylessIdentity: "https://github.com/aburan28/parallax/.github/workflows/release.yaml@refs/tags/*"
+      rekor: true
+  config:
+    # In-kernel L7 filtering: sessions inherit these defaults; see
+    # examples/plugins/capture-ebpf.yaml for a full filter set.
+    attach:
+      mode: socket
+    sink:
+      endpoint: grpc://kapture-capture.kapture-system:4318
+---
+apiVersion: parallax.dev/v1alpha1
+kind: Plugin
+metadata:
   name: exporter-webhook
 spec:
   kind: exporter

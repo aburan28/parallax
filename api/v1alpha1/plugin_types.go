@@ -22,7 +22,7 @@ import (
 )
 
 // PluginKind is the extension seam a Plugin implements (DESIGN.md §5.1).
-// +kubebuilder:validation:Enum=target;loaddriver;provider;strategy;scenario;exporter
+// +kubebuilder:validation:Enum=target;loaddriver;provider;strategy;scenario;exporter;capture
 type PluginKind string
 
 const (
@@ -32,6 +32,7 @@ const (
 	PluginKindStrategy   PluginKind = "strategy"
 	PluginKindScenario   PluginKind = "scenario"
 	PluginKindExporter   PluginKind = "exporter"
+	PluginKindCapture    PluginKind = "capture"
 )
 
 // PluginPhase tracks install/verify state (DESIGN.md §5.3).

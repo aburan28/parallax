@@ -107,6 +107,11 @@ func registerKind(srv *grpc.Server, cfg ServeConfig) error {
 			return fmt.Errorf("plugin %s: kind exporter requires an Exporter service", cfg.Name)
 		}
 		pluginv1.RegisterExporterServer(srv, cfg.Exporter)
+	case pluginv1.PluginKind_PLUGIN_KIND_CAPTURE:
+		if cfg.Capture == nil {
+			return fmt.Errorf("plugin %s: kind capture requires a Capture service", cfg.Name)
+		}
+		pluginv1.RegisterCaptureServer(srv, cfg.Capture)
 	default:
 		return fmt.Errorf("plugin %s: unspecified or unknown kind %v", cfg.Name, cfg.Kind)
 	}
