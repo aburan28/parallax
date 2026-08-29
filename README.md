@@ -14,7 +14,7 @@ The name is the method: a single observation can't give you depth — two vantag
 
 ## Architecture in one paragraph
 
-Parallax is a Kubernetes **operator** reconciling four CRDs — `Study`, `Trial`, `Plugin`, `Dataset` — plus a thin CLI (with a `--local` mode that runs the same controllers against kind, no install required). **Every extension seam is a versioned gRPC subprocess plugin**: targets, load drivers, metrics providers, search strategies, chaos scenarios, exporters. Plugins are declared by `Plugin` CRs, delivered as signed OCI images, verified before install, and **hot-reloaded** with drain-and-swap — the same battle-tested conventions as kapture's replay-engine ABI, generalized platform-wide. Results live in **PostgreSQL** (SQLite in local mode) with large artifacts in object storage, so every decision is auditable SQL, not a pile of files.
+Parallax is a Kubernetes **operator** reconciling four CRDs — `Study`, `Trial`, `Plugin`, `Dataset` — plus a thin CLI (with a `--local` mode that runs the same controllers against kind, no install required). **Every extension seam is a versioned gRPC subprocess plugin**: targets, load drivers, metrics providers, search strategies, chaos scenarios, exporters, traffic captures. Plugins are declared by `Plugin` CRs, delivered as signed OCI images, verified before install, and **hot-reloaded** with drain-and-swap — the same battle-tested conventions as kapture's replay-engine ABI, generalized platform-wide. Results live in **PostgreSQL** (SQLite in local mode) with large artifacts in object storage, so every decision is auditable SQL, not a pile of files.
 
 ## How it relates to kapture
 

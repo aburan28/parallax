@@ -75,6 +75,7 @@ spec:
                 - strategy
                 - scenario
                 - exporter
+                - capture
                 type: string
               namespaceSelector:
                 description: |-

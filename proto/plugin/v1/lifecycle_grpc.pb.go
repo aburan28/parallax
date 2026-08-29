@@ -1,6 +1,7 @@
 // The parallax plugin ABI (DESIGN.md §5.2). Every plugin — regardless of kind —
 // serves the Lifecycle service plus exactly one kind service (target, loaddriver,
-// provider, strategy, scenario, exporter) on the same gRPC server over a unix socket.
+// provider, strategy, scenario, exporter, capture) on the same gRPC server over a
+// unix socket.
 //
 // Process contract (§5.2): the host launches the binary with the magic-cookie env
 // PARALLAX_PLUGIN_MAGIC=parallax-plugin and a socket-dir env; the plugin prints

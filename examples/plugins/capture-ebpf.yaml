@@ -1,0 +1,46 @@
+# capture-ebpf: taps live L7 traffic on the system under test with eBPF and
+# forwards matched records to a capture service (DESIGN.md §5.1). Filter rules
+# (HTTP/1, HTTP/2, gRPC) are compiled to an in-kernel stage — ports, methods,
+# path prefixes, status codes as map lookups — plus a userspace finishing stage
+# for regex and header predicates. Matched records land in kapture's capture
+# ingest as versioned datasets, replayable by loaddriver-kapture.
+apiVersion: parallax.dev/v1alpha1
+kind: Plugin
+metadata:
+  name: capture-ebpf
+spec:
+  kind: capture
+  image: ghcr.io/aburan28/parallax-capture-ebpf:0.1.0
+  verify:
+    cosign:
+      keylessIdentity: "https://github.com/aburan28/parallax/.github/workflows/release.yaml@refs/tags/*"
+      rekor: true
+  config:
+    # Defaults every capture session inherits unless its own spec overrides them.
+    attach:
+      mode: socket            # socket | tc | uprobe-tls (plaintext before TLS)
+    sink:
+      # kapture capture-service ingest; matched records append to `dataset`.
+      endpoint: grpc://kapture-capture.kapture-system:4318
+      compression: zstd
+    sampling:
+      percent: 100
+    # Example session filter set (first-match-wins; unmatched traffic is never
+    # captured): drop health checks, capture checkout writes and one gRPC method.
+    filters:
+      - name: no-health
+        protocol: http1
+        pathPrefixes: ["/healthz", "/readyz"]
+        action: drop
+      - name: checkout-writes
+        protocol: http1
+        ports: [8080]
+        methods: [POST, PUT]
+        pathPrefixes: ["/cart", "/checkout"]
+        headers:
+          - name: content-type
+            valuePrefix: application/json
+        statusCodes: [200, 201]
+      - name: payments
+        protocol: grpc
+        methods: ["/shop.Payments/Charge"]

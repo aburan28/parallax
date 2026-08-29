@@ -188,6 +188,7 @@ Everything extends through one mechanism: **gRPC subprocess plugins** behind a v
 | `strategy` | `Ask(space, budget, seed, observations, pending)` — stateless | `builtin:grid` / `builtin:random` compiled in for `--local` zero-dep runs; `strategy-grid`, `strategy-random`, `strategy-sobol`, `strategy-asha`, `strategy-optuna` (Python) as Plugin CRs | between Ask calls |
 | `scenario` | `Inject / Verify / Revert (stream events)` | `scenario-pod-kill`, `scenario-netpol-outage`, `scenario-rate-burst`, `scenario-hpa-ramp` | trial boundary |
 | `exporter` | `Export(event, refs)` | `exporter-webhook`, `exporter-slack`, `exporter-ocibundle` (pushes report bundles as OCI artifacts) | anytime (idempotent) |
+| `capture` | `Plan / Start / Status / UpdateFilters / Stop` | `capture-ebpf` (in-kernel L7 filtering via eBPF — HTTP/1, HTTP/2, gRPC rules compiled to a kernel stage of map lookups plus a userspace finishing stage for regex/header predicates; matched records are forwarded to a capture service such as kapture's capture ingest, landing as replayable datasets) | trial boundary |
 
 The `derived` SLI class is evaluated in-core (pure arithmetic over already-collected SLIs — no subprocess needed, nothing to extend).
 
@@ -234,12 +235,12 @@ The Plugin controller resolves the image, **verifies the cosign signature** per 
 ### 5.4 Hot reload
 
 - The host fsnotify-watches the plugin dir (debounced ~500ms, matching kapture). A changed binary (new digest from a `Plugin` CR update rolling through the installer) triggers **drain-and-swap**: `Drain()` the old subprocess (bounded grace, default 30s), launch the new one, `Describe`/`Configure`, then route new calls to it. A failed reload keeps the old process running and marks the `Plugin` CR `Degraded` with an Event — never a silent downgrade to nothing.
-- **Swap boundaries protect trial integrity** (§5.1): `target`, `loaddriver`, `provider`, and `scenario` plugins are only swapped *between* trials — a running trial pins its plugin set (the resolved digests are part of the trial's environment fingerprint, so a mid-study plugin upgrade is visible in the data and validation refuses to mix fingerprints). `strategy` swaps between `Ask` calls (it holds no state to lose); `exporter` swaps anytime.
+- **Swap boundaries protect trial integrity** (§5.1): `target`, `loaddriver`, `provider`, `scenario`, and `capture` plugins are only swapped *between* trials — a running trial pins its plugin set (the resolved digests are part of the trial's environment fingerprint, so a mid-study plugin upgrade is visible in the data and validation refuses to mix fingerprints). `strategy` swaps between `Ask` calls (it holds no state to lose); `exporter` swaps anytime.
 - Rollback = re-point the `Plugin` CR at the previous digest; same path, no special case. GitOps-friendly by construction.
 
 ### 5.5 Plugin security model
 
-- **No ambient credentials.** Plugins get no secrets by default. The host mediates: providers receive scoped, short-lived tokens for exactly the endpoints their `Plugin` CR names; the kapture target plugin is the only component holding capture-storage read credentials (mirroring kapture's host-owns-storage boundary); strategies and exporters get none unless the CR grants them.
+- **No ambient credentials.** Plugins get no secrets by default. The host mediates: providers receive scoped, short-lived tokens for exactly the endpoints their `Plugin` CR names; the kapture target plugin is the only component holding capture-storage read credentials (mirroring kapture's host-owns-storage boundary); a capture plugin holds only write-scoped credentials for the one capture-ingest endpoint its CR names; strategies and exporters get none unless the CR grants them.
 - **Sandboxed subprocesses**: plugins run inside the operator pod's restricted context (distroless nonroot, read-only rootfs, no-new-privileges, RuntimeDefault seccomp) — they are peers of the host process, not privileged sidecars. Per-call deadlines and circuit breakers stop a wedged plugin from wedging the operator; a plugin crash fails its trial, never the control plane.
 - **Supply chain**: signature verification before install (§5.3), digest recording in the DB audit trail, SBOMs published per release (§17.2).
 

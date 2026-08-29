@@ -1,6 +1,7 @@
 // The parallax plugin ABI (DESIGN.md §5.2). Every plugin — regardless of kind —
 // serves the Lifecycle service plus exactly one kind service (target, loaddriver,
-// provider, strategy, scenario, exporter) on the same gRPC server over a unix socket.
+// provider, strategy, scenario, exporter, capture) on the same gRPC server over a
+// unix socket.
 //
 // Process contract (§5.2): the host launches the binary with the magic-cookie env
 // PARALLAX_PLUGIN_MAGIC=parallax-plugin and a socket-dir env; the plugin prints
@@ -12,7 +13,7 @@ package parallax.plugin.v1;
 
 option go_package = "github.com/aburan28/parallax/proto/plugin/v1;pluginv1";
 
-// PluginKind enumerates the six extension seams (DESIGN.md §5.1).
+// PluginKind enumerates the seven extension seams (DESIGN.md §5.1).
 enum PluginKind {
   PLUGIN_KIND_UNSPECIFIED = 0;
   PLUGIN_KIND_TARGET = 1;
@@ -21,6 +22,7 @@ enum PluginKind {
   PLUGIN_KIND_STRATEGY = 4;
   PLUGIN_KIND_SCENARIO = 5;
   PLUGIN_KIND_EXPORTER = 6;
+  PLUGIN_KIND_CAPTURE = 7;
 }
 
 // BuildInfo is stamped at build time and recorded in the plugin_audit trail.

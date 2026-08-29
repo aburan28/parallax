@@ -17,7 +17,7 @@ limitations under the License.
 // Package plugin is the Go SDK for parallax gRPC subprocess plugins (DESIGN.md §5.2).
 // A plugin main constructs a ServeConfig and calls Serve; the host uses ParseHandshake
 // and Dial to connect. The conventions deliberately mirror kapture's replay-engine ABI
-// (App. A.2), generalized across the six plugin kinds.
+// (App. A.2), generalized across the seven plugin kinds.
 package plugin
 
 import (
@@ -102,6 +102,7 @@ type ServeConfig struct {
 	Strategy   pluginv1.StrategyServer
 	Scenario   pluginv1.ScenarioServer
 	Exporter   pluginv1.ExporterServer
+	Capture    pluginv1.CaptureServer
 }
 
 // KindString returns the short kind string ("target", "provider", …) for discovery.
@@ -119,6 +120,8 @@ func KindString(k pluginv1.PluginKind) string {
 		return "scenario"
 	case pluginv1.PluginKind_PLUGIN_KIND_EXPORTER:
 		return "exporter"
+	case pluginv1.PluginKind_PLUGIN_KIND_CAPTURE:
+		return "capture"
 	default:
 		return "unknown"
 	}
